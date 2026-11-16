@@ -4,15 +4,42 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- Glowing green circle -->
+    <!-- Subtitle / Translation Speech Bubble -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M40,27 H68 A3,3 0 0,1 71,30 V39 A3,3 0 0,1 68,42 H48 L43,46 L44,42 H40 A3,3 0 0,1 37,39 V30 A3,3 0 0,1 40,27 Z" />
+    <!-- Subtitle Text Lines inside Bubble -->
+    <path
+        android:fillColor="#0D1F12"
+        android:pathData="M42,32 H66 V34.5 H42 Z" />
+    <path
+        android:fillColor="#0D1F12"
+        android:pathData="M42,36.5 H59 V39 H42 Z" />
+
+    <!-- Original Gamepad Silhouette (no Xbox X logo) -->
     <path
         android:fillColor="#00FF88"
-        android:pathData="M54,22 A32,32 0 1,1 53.99,22 Z" />
+        android:pathData="M37,48 H71 C75.5,48 78.5,51.5 79.5,56.5 L81,66.5 C81.5,70.5 78.5,74 74.5,74 C72,74 70,72.5 68.5,70.5 L64.5,65 H43.5 L39.5,70.5 C38,72.5 36,74 33.5,74 C29.5,74 26.5,70.5 27,66.5 L28.5,56.5 C29.5,51.5 32.5,48 37,48 Z" />
+
+    <!-- D-Pad (Left) -->
     <path
-        android:fillColor="#0B1F0E"
-        android:pathData="M54,27 A27,27 0 1,1 53.99,27 Z" />
-    <!-- Stylized X for Xbox Translator -->
+        android:fillColor="#0D1F12"
+        android:pathData="M38,52 H41 V61 H38 Z" />
     <path
-        android:fillColor="#00FF88"
-        android:pathData="M39,39 L47,39 L54,49 L61,39 L69,39 L58,54 L70,70 L62,70 L54,59 L46,70 L38,70 L50,54 Z" />
+        android:fillColor="#0D1F12"
+        android:pathData="M35,55 H44 V58 H35 Z" />
+
+    <!-- Action Buttons (Right) -->
+    <path
+        android:fillColor="#0D1F12"
+        android:pathData="M68,51.5 A1.8,1.8 0 1,1 67.99,51.5 Z" />
+    <path
+        android:fillColor="#0D1F12"
+        android:pathData="M68,58.5 A1.8,1.8 0 1,1 67.99,58.5 Z" />
+    <path
+        android:fillColor="#0D1F12"
+        android:pathData="M64.5,55 A1.8,1.8 0 1,1 64.49,55 Z" />
+    <path
+        android:fillColor="#0D1F12"
+        android:pathData="M71.5,55 A1.8,1.8 0 1,1 71.49,55 Z" />
 </vector>
