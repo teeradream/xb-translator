@@ -183,7 +183,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             }
         }
 
-        webView.loadUrl("https://www.xbox.com/play")
+        webView.loadUrl("https://www.xbox.com/play/consoles")
     }
 
     private fun prefetchBetterXcloudScript() {
@@ -392,7 +392,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         binding.btnReloadXbox.setOnClickListener {
             binding.menuPanelContainer.isVisible = false
             resetMenuButtonTimer()
-            binding.xboxWebView.loadUrl("https://www.xbox.com/play")
+            binding.xboxWebView.loadUrl("https://www.xbox.com/play/consoles")
             Toast.makeText(this, "กำลังรีโหลดหน้า Xbox...", Toast.LENGTH_SHORT).show()
         }
     }
