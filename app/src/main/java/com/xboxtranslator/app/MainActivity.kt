@@ -1,12 +1,18 @@
 package com.xboxtranslator.app
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.SharedPreferences
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Rect
 import android.graphics.drawable.GradientDrawable
+import android.media.AudioAttributes
+import android.media.AudioDeviceCallback
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
 import android.os.*
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
@@ -15,6 +21,8 @@ import android.view.*
 import android.webkit.*
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import androidx.core.view.isVisible
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
@@ -97,15 +105,25 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
     }
 
+    private lateinit var audioManager: AudioManager
+    private var audioDeviceCallback: AudioDeviceCallback? = null
+    private var audioModeListener: Any? = null
+
+    companion object {
+        private const val REQ_BLUETOOTH_CONNECT = 1001
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         hideSystemUI()
+        volumeControlStream = AudioManager.STREAM_MUSIC
 
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
+        setupAudioRouting()
         tts = TextToSpeech(this, this)
 
         cropPrefs = getSharedPreferences("xbox_translator_crop", Context.MODE_PRIVATE)
@@ -379,6 +397,12 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
+            tts?.setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build()
+            )
             tts?.language = Locale("th", "TH")
             tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                 override fun onStart(utteranceId: String?) {}
@@ -1135,8 +1159,128 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         super.onBackPressed()
     }
 
+    private fun setupAudioRouting() {
+        audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT)
+                != PackageManager.PERMISSION_GRANTED
+            ) {
+                ActivityCompat.requestPermissions(
+                    this,
+                    arrayOf(Manifest.permission.BLUETOOTH_CONNECT),
+                    REQ_BLUETOOTH_CONNECT
+                )
+            }
+
+            val modeListener = AudioManager.OnModeChangedListener {
+                applyBluetoothAudioRouting()
+            }
+            audioManager.addOnModeChangedListener(mainExecutor, modeListener)
+            audioModeListener = modeListener
+        }
+
+        val callback = object : AudioDeviceCallback() {
+            override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>?) {
+                applyBluetoothAudioRouting()
+            }
+
+            override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>?) {
+                applyBluetoothAudioRouting()
+            }
+        }
+        audioManager.registerAudioDeviceCallback(callback, uiVisibilityHandler)
+        audioDeviceCallback = callback
+
+        applyBluetoothAudioRouting()
+    }
+
+    private fun applyBluetoothAudioRouting() {
+        if (!::audioManager.isInitialized) return
+
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val commDevices = audioManager.availableCommunicationDevices
+                val preferredDevice = commDevices.firstOrNull {
+                    it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
+                        it.type == AudioDeviceInfo.TYPE_BLE_HEADSET ||
+                        it.type == AudioDeviceInfo.TYPE_BLE_SPEAKER ||
+                        it.type == AudioDeviceInfo.TYPE_HEARING_AID
+                } ?: commDevices.firstOrNull {
+                    it.type == AudioDeviceInfo.TYPE_WIRED_HEADSET ||
+                        it.type == AudioDeviceInfo.TYPE_USB_HEADSET
+                }
+
+                if (preferredDevice != null) {
+                    @Suppress("DEPRECATION")
+                    audioManager.isSpeakerphoneOn = false
+                    audioManager.setCommunicationDevice(preferredDevice)
+                } else {
+                    audioManager.clearCommunicationDevice()
+                }
+            } else {
+                @Suppress("DEPRECATION")
+                val outputs = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+                val hasBluetooth = outputs.any {
+                    it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP ||
+                        it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO
+                }
+                val hasWired = outputs.any {
+                    it.type == AudioDeviceInfo.TYPE_WIRED_HEADSET ||
+                        it.type == AudioDeviceInfo.TYPE_WIRED_HEADPHONES ||
+                        it.type == AudioDeviceInfo.TYPE_USB_HEADSET
+                }
+                if (hasBluetooth || hasWired) {
+                    @Suppress("DEPRECATION")
+                    audioManager.isSpeakerphoneOn = false
+                    if (hasBluetooth && audioManager.mode == AudioManager.MODE_IN_COMMUNICATION) {
+                        @Suppress("DEPRECATION")
+                        audioManager.isBluetoothScoOn = true
+                        @Suppress("DEPRECATION")
+                        audioManager.startBluetoothSco()
+                    }
+                }
+            }
+        } catch (_: SecurityException) {
+            // BLUETOOTH_CONNECT not yet granted by user
+        } catch (_: Exception) {
+            // Ignore transient routing errors
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQ_BLUETOOTH_CONNECT &&
+            grantResults.isNotEmpty() &&
+            grantResults[0] == PackageManager.PERMISSION_GRANTED
+        ) {
+            applyBluetoothAudioRouting()
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        applyBluetoothAudioRouting()
+    }
+
     override fun onDestroy() {
         super.onDestroy()
+        if (::audioManager.isInitialized) {
+            audioDeviceCallback?.let { audioManager.unregisterAudioDeviceCallback(it) }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                (audioModeListener as? AudioManager.OnModeChangedListener)?.let {
+                    audioManager.removeOnModeChangedListener(it)
+                }
+                audioManager.clearCommunicationDevice()
+            } else {
+                @Suppress("DEPRECATION")
+                audioManager.stopBluetoothSco()
+            }
+        }
         uiVisibilityHandler.removeCallbacks(captureRunnable)
         uiVisibilityHandler.removeCallbacks(hideMenuButtonRunnable)
         activeUtterances.clear()
