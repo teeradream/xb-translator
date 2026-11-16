@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Rect
 import android.graphics.drawable.GradientDrawable
@@ -16,6 +17,7 @@ import android.media.AudioManager
 import android.os.*
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import android.util.Base64
 import android.util.TypedValue
 import android.view.*
 import android.webkit.*
@@ -424,24 +426,120 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         val webView = binding.xboxWebView
         if (webView.width <= 0 || webView.height <= 0) return
 
+        val cropLeftNorm = cropPrefs.getFloat("crop_left", 0.18f).coerceIn(0f, 0.85f)
+        val cropTopNorm = cropPrefs.getFloat("crop_top", 0.72f).coerceIn(0f, 0.90f)
+        val cropWidthNorm = cropPrefs.getFloat("crop_width", 0.64f).coerceIn(0.10f, 1f - cropLeftNorm)
+        val cropHeightNorm = cropPrefs.getFloat("crop_height", 0.22f).coerceIn(0.06f, 1f - cropTopNorm)
+
+        isCapturing = true
+
+        // Capture directly from the underlying HTML5 <video> element so Android overlays
+        // (such as Pure Text Only black screen or subtitle box) never block or pollute OCR.
+        val js = """
+            (function() {
+                try {
+                    var videos = Array.prototype.slice.call(document.querySelectorAll('video'));
+                    var video = null;
+                    var bestArea = 0;
+                    for (var i = 0; i < videos.length; i++) {
+                        var v = videos[i];
+                        if (v.videoWidth > 0 && v.videoHeight > 0 && !v.paused && !v.ended && v.readyState >= 2) {
+                            var area = v.videoWidth * v.videoHeight;
+                            if (area > bestArea) { bestArea = area; video = v; }
+                        }
+                    }
+                    if (!video) return '';
+
+                    var rect = video.getBoundingClientRect();
+                    var winW = window.innerWidth || document.documentElement.clientWidth;
+                    var winH = window.innerHeight || document.documentElement.clientHeight;
+                    if (!rect.width || !rect.height || !winW || !winH) return '';
+
+                    var elemRatio = rect.width / rect.height;
+                    var vidRatio = video.videoWidth / video.videoHeight;
+                    var renderW = rect.width, renderH = rect.height, renderX = rect.left, renderY = rect.top;
+                    if (vidRatio > elemRatio) {
+                        renderH = rect.width / vidRatio;
+                        renderY = rect.top + (rect.height - renderH) / 2;
+                    } else if (vidRatio < elemRatio) {
+                        renderW = rect.height * vidRatio;
+                        renderX = rect.left + (rect.width - renderW) / 2;
+                    }
+
+                    var boxX = $cropLeftNorm * winW;
+                    var boxY = $cropTopNorm * winH;
+                    var boxW = $cropWidthNorm * winW;
+                    var boxH = $cropHeightNorm * winH;
+
+                    var relX = (boxX - renderX) / renderW;
+                    var relY = (boxY - renderY) / renderH;
+                    var relW = boxW / renderW;
+                    var relH = boxH / renderH;
+
+                    var sx = Math.max(0, Math.min(video.videoWidth - 1, Math.floor(relX * video.videoWidth)));
+                    var sy = Math.max(0, Math.min(video.videoHeight - 1, Math.floor(relY * video.videoHeight)));
+                    var sw = Math.max(20, Math.min(video.videoWidth - sx, Math.floor(relW * video.videoWidth)));
+                    var sh = Math.max(16, Math.min(video.videoHeight - sy, Math.floor(relH * video.videoHeight)));
+
+                    var scale = Math.min(2, Math.max(1, Math.floor(1400 / sw)));
+                    var canvas = document.createElement('canvas');
+                    canvas.width = sw * scale;
+                    canvas.height = sh * scale;
+                    var ctx = canvas.getContext('2d');
+                    ctx.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+                    return canvas.toDataURL('image/jpeg', 0.88);
+                } catch (e) {
+                    return '';
+                }
+            })();
+        """.trimIndent()
+
+        webView.evaluateJavascript(js) { rawResult ->
+            val cleaned = rawResult?.trim()?.removeSurrounding("\"") ?: ""
+            val base64Idx = cleaned.indexOf("base64,")
+            if (base64Idx >= 0) {
+                try {
+                    val b64 = cleaned.substring(base64Idx + 7)
+                    val bytes = Base64.decode(b64, Base64.DEFAULT)
+                    val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                    if (bitmap != null) {
+                        processCroppedBitmap(bitmap)
+                        return@evaluateJavascript
+                    }
+                } catch (_: Exception) {
+                    // Fall through to PixelCopy fallback if allowed
+                }
+            }
+
+            // Fallback to PixelCopy only when no opaque overlay (black screen / menu) is covering the WebView
+            if (binding.pureFullscreenLayout.isVisible || binding.menuPanelContainer.isVisible) {
+                isCapturing = false
+                return@evaluateJavascript
+            }
+            captureViaPixelCopy(webView, cropLeftNorm, cropTopNorm, cropWidthNorm, cropHeightNorm)
+        }
+    }
+
+    private fun captureViaPixelCopy(
+        webView: WebView,
+        cropLeftNorm: Float,
+        cropTopNorm: Float,
+        cropWidthNorm: Float,
+        cropHeightNorm: Float
+    ) {
         val location = IntArray(2)
         webView.getLocationInWindow(location)
         val rect = Rect(location[0], location[1], location[0] + webView.width, location[1] + webView.height)
-        if (rect.width() <= 0 || rect.height() <= 0) return
+        if (rect.width() <= 0 || rect.height() <= 0) {
+            isCapturing = false
+            return
+        }
 
         val fullBitmap = Bitmap.createBitmap(webView.width, webView.height, Bitmap.Config.ARGB_8888)
-        isCapturing = true
-
         try {
             PixelCopy.request(window, rect, fullBitmap, { copyResult ->
-                isCapturing = false
                 if (copyResult == PixelCopy.SUCCESS) {
                     try {
-                        val cropLeftNorm = cropPrefs.getFloat("crop_left", 0.18f).coerceIn(0f, 0.85f)
-                        val cropTopNorm = cropPrefs.getFloat("crop_top", 0.72f).coerceIn(0f, 0.90f)
-                        val cropWidthNorm = cropPrefs.getFloat("crop_width", 0.64f).coerceIn(0.10f, 1f - cropLeftNorm)
-                        val cropHeightNorm = cropPrefs.getFloat("crop_height", 0.22f).coerceIn(0.06f, 1f - cropTopNorm)
-
                         val cropX = (fullBitmap.width * cropLeftNorm).toInt().coerceIn(0, fullBitmap.width - 1)
                         val cropY = (fullBitmap.height * cropTopNorm).toInt().coerceIn(0, fullBitmap.height - 1)
                         val cropW = (fullBitmap.width * cropWidthNorm).toInt().coerceIn(40, fullBitmap.width - cropX)
@@ -449,53 +547,15 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
                         val subBitmap = Bitmap.createBitmap(fullBitmap, cropX, cropY, cropW, cropH)
                         val scaledSub = Bitmap.createScaledBitmap(subBitmap, cropW * 2, cropH * 2, true)
-                        val image = InputImage.fromBitmap(scaledSub, 0)
-                        textRecognizer.process(image)
-                            .addOnSuccessListener { visionText ->
-                                val rawText = visionText.text.trim().replace("\n", " ")
-                                val fixedText = fixOcrText(rawText)
-                                val text = fixedText.replace(Regex("\\s+"), " ").trim()
-                                if (text.isNotEmpty() && isDialogueSubtitle(text)) {
-                                    val isDuplicateOfPending = isTranslating && isSimilarText(text, pendingOcrEnglish)
-                                    val isDuplicateOfLast = isSimilarText(text, lastTranslatedEnglish)
-                                    val isDuplicateOfRecent = subtitleHistory.take(2).any { isSimilarText(text, it.english) }
-
-                                    if (!isTranslating && !isDuplicateOfPending && !isDuplicateOfLast && !isDuplicateOfRecent) {
-                                        isTranslating = true
-                                        pendingOcrEnglish = text
-                                        ocrScope.launch {
-                                            try {
-                                                val thai = translateToThai(text)
-                                                val isDuplicateThai = isSimilarThai(thai, lastTranslatedThai) ||
-                                                    subtitleHistory.take(2).any { isSimilarThai(thai, it.thai) }
-                                                if (!isDuplicateThai) {
-                                                    lastTranslatedEnglish = text
-                                                    lastTranslatedThai = thai
-                                                    subtitleHistory.add(0, SubtitleHistoryItem(text, thai))
-                                                    while (subtitleHistory.size > maxHistoryLines) {
-                                                        subtitleHistory.removeAt(subtitleHistory.size - 1)
-                                                    }
-                                                    renderSubtitles()
-                                                    if (isTtsEnabled) {
-                                                        speakTranslation(text, thai)
-                                                    }
-                                                }
-                                            } finally {
-                                                isTranslating = false
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            .addOnCompleteListener {
-                                fullBitmap.recycle()
-                                subBitmap.recycle()
-                                scaledSub.recycle()
-                            }
+                        fullBitmap.recycle()
+                        subBitmap.recycle()
+                        processCroppedBitmap(scaledSub)
                     } catch (_: Exception) {
+                        isCapturing = false
                         fullBitmap.recycle()
                     }
                 } else {
+                    isCapturing = false
                     fullBitmap.recycle()
                 }
             }, Handler(Looper.getMainLooper()))
@@ -503,6 +563,51 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             isCapturing = false
             fullBitmap.recycle()
         }
+    }
+
+    private fun processCroppedBitmap(bitmap: Bitmap) {
+        isCapturing = false
+        val image = InputImage.fromBitmap(bitmap, 0)
+        textRecognizer.process(image)
+            .addOnSuccessListener { visionText ->
+                val rawText = visionText.text.trim().replace("\n", " ")
+                val fixedText = fixOcrText(rawText)
+                val text = fixedText.replace(Regex("\\s+"), " ").trim()
+                if (text.isNotEmpty() && isDialogueSubtitle(text)) {
+                    val isDuplicateOfPending = isTranslating && isSimilarText(text, pendingOcrEnglish)
+                    val isDuplicateOfLast = isSimilarText(text, lastTranslatedEnglish)
+                    val isDuplicateOfRecent = subtitleHistory.take(2).any { isSimilarText(text, it.english) }
+
+                    if (!isTranslating && !isDuplicateOfPending && !isDuplicateOfLast && !isDuplicateOfRecent) {
+                        isTranslating = true
+                        pendingOcrEnglish = text
+                        ocrScope.launch {
+                            try {
+                                val thai = translateToThai(text)
+                                val isDuplicateThai = isSimilarThai(thai, lastTranslatedThai) ||
+                                    subtitleHistory.take(2).any { isSimilarThai(thai, it.thai) }
+                                if (!isDuplicateThai) {
+                                    lastTranslatedEnglish = text
+                                    lastTranslatedThai = thai
+                                    subtitleHistory.add(0, SubtitleHistoryItem(text, thai))
+                                    while (subtitleHistory.size > maxHistoryLines) {
+                                        subtitleHistory.removeAt(subtitleHistory.size - 1)
+                                    }
+                                    renderSubtitles()
+                                    if (isTtsEnabled) {
+                                        speakTranslation(text, thai)
+                                    }
+                                }
+                            } finally {
+                                isTranslating = false
+                            }
+                        }
+                    }
+                }
+            }
+            .addOnCompleteListener {
+                bitmap.recycle()
+            }
     }
 
     private fun setupSubtitleStylingControls() {
