@@ -802,7 +802,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             "TEXT" -> "ปรับแต่งตัวหนังสือ"
             "VOICE" -> "การออกเสียงพากย์"
             "MODE" -> "โหมดและการแสดงผล"
-            else -> "ตั้งค่า Xbox Translator"
+            else -> "ตั้งค่า XB Translator"
         }
     }
 
@@ -1160,7 +1160,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             if (subtitleHistory.isNotEmpty()) {
                 renderSubtitles()
             } else {
-                binding.pureFullscreenText.text = "Xbox Translator\n(รอรับข้อความซับไตเติ้ลจากเกม...)"
+                binding.pureFullscreenText.text = "XB Translator\n(รอรับข้อความซับไตเติ้ลจากเกม...)"
                 binding.pureFullscreenText.isVisible = true
                 binding.pureFullscreenText1.isVisible = false
                 binding.pureFullscreenText2.isVisible = false

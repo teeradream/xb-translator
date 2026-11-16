@@ -182,7 +182,7 @@
                 android:textSize="32sp"
                 android:textStyle="bold"
                 android:gravity="center"
-                android:text="Xbox Translator\n(รอรับข้อความซับไตเติ้ลจากเกม...)"/>
+                android:text="XB Translator\n(รอรับข้อความซับไตเติ้ลจากเกม...)"/>
 
             <TextView
                 android:id="@+id/pureFullscreenText1"
@@ -373,7 +373,7 @@
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
-                        android:text="ตั้งค่า Xbox Translator"
+                        android:text="ตั้งค่า XB Translator"
                         android:textColor="#FFFFFF"
                         android:textSize="17sp"
                         android:textStyle="bold"/>
@@ -456,7 +456,42 @@
                         android:textStyle="bold"
                         app:strokeColor="#44FFFFFF"
                         app:backgroundTint="#1AFFFFFF"
-                        android:layout_marginBottom="4dp"/>
+                        android:layout_marginBottom="10dp"/>
+
+                    <!-- Disclaimer & Credits -->
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical"
+                        android:background="#12FFFFFF"
+                        android:padding="10dp">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="XB Translator (Unofficial Tool)"
+                            android:textColor="#CCFFFFFF"
+                            android:textSize="11sp"
+                            android:textStyle="bold"
+                            android:layout_marginBottom="3dp"/>
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="แอปเสริมแปลซับไตเติลส่วนบุคคล ไม่ได้เกี่ยวข้องหรือรับรองโดย Microsoft / Xbox ผู้ใช้ต้องล็อกอินบัญชีของตนเอง"
+                            android:textColor="#99FFFFFF"
+                            android:textSize="10sp"
+                            android:lineSpacingExtra="2dp"
+                            android:layout_marginBottom="4dp"/>
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="Credits: Better xCloud (redphx) • Google ML Kit OCR • Google Translate • Android TTS"
+                            android:textColor="#8000FF88"
+                            android:textSize="10sp"
+                            android:lineSpacingExtra="2dp"/>
+                    </LinearLayout>
                 </LinearLayout>
 
                 <!-- ================= SUB-PAGE 1: TEXT & SUBTITLE STYLING ================= -->
