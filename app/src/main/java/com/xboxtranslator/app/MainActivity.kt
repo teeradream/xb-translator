@@ -1,0 +1,1167 @@
+package com.xboxtranslator.app
+
+import android.annotation.SuppressLint
+import android.content.Context
+import android.content.SharedPreferences
+import android.graphics.Bitmap
+import android.graphics.Color
+import android.graphics.Rect
+import android.graphics.drawable.GradientDrawable
+import android.os.*
+import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
+import android.util.TypedValue
+import android.view.*
+import android.webkit.*
+import android.widget.Toast
+import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.isVisible
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import com.xboxtranslator.app.databinding.ActivityMainBinding
+import kotlinx.coroutines.*
+import org.json.JSONArray
+import java.io.File
+import java.net.URL
+import java.net.URLEncoder
+import java.util.*
+
+class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
+
+    private lateinit var binding: ActivityMainBinding
+
+    private val uiVisibilityHandler = Handler(Looper.getMainLooper())
+    private val textRecognizer by lazy { TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS) }
+    private val ocrScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+
+    enum class VoiceGenderMode {
+        AUTO_AI,
+        FEMALE,
+        MALE
+    }
+
+    enum class TtsQueueMode {
+        QUEUE_ALL,
+        FLUSH_IMMEDIATE,
+        SMART_QUEUE
+    }
+
+    data class SubtitleHistoryItem(
+        val english: String,
+        val thai: String,
+        val timestamp: Long = System.currentTimeMillis()
+    )
+
+    private var tts: TextToSpeech? = null
+    private var isTtsEnabled = false
+    private var voiceGenderMode = VoiceGenderMode.AUTO_AI
+    private var ttsQueueMode = TtsQueueMode.SMART_QUEUE
+    private val activeUtterances = Collections.synchronizedSet(mutableSetOf<String>())
+    private var isSubtitleEnabled = true
+    private var isAudioMuted = false
+    private var isTextOnlyMode = false
+    private var isCapturing = false
+    private var isTranslating = false
+    private var pendingOcrEnglish = ""
+    private var lastTranslatedEnglish = ""
+    private var lastTranslatedThai = ""
+    private var lastSpokenThai = ""
+    private var lastSpokenTimeMs = 0L
+
+    private lateinit var cropPrefs: SharedPreferences
+    private var isFilterShortTextEnabled = true
+    private var speechSpeedRate = 1.25f
+
+    private val subtitleHistory = mutableListOf<SubtitleHistoryItem>()
+    private var maxHistoryLines = 3
+    private var currentSubTextColor = Color.parseColor("#00FF88")
+    private var currentSubFontSize = 26
+    private var currentSubPosition = "CENTER"
+    private var currentSubBgOpacity = 80
+
+    private var betterXcloudScript: String? = null
+
+    private val hideMenuButtonRunnable = Runnable {
+        if (::binding.isInitialized && !binding.menuPanelContainer.isVisible) {
+            binding.btnMenuToggle.animate().alpha(0.35f).setDuration(300).start()
+        }
+    }
+
+    private val captureRunnable = object : Runnable {
+        override fun run() {
+            if (isSubtitleEnabled || isTtsEnabled) {
+                captureAndTranslateFrame()
+            }
+            uiVisibilityHandler.postDelayed(this, 1500)
+        }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        hideSystemUI()
+
+        binding = ActivityMainBinding.inflate(layoutInflater)
+        setContentView(binding.root)
+
+        tts = TextToSpeech(this, this)
+
+        cropPrefs = getSharedPreferences("xbox_translator_crop", Context.MODE_PRIVATE)
+        isFilterShortTextEnabled = cropPrefs.getBoolean("filter_short_ui", true)
+        binding.filterShortTextSwitch.isChecked = isFilterShortTextEnabled
+
+        setupXboxWebView()
+        prefetchBetterXcloudScript()
+        setupMenuControls()
+        setupSubtitleStylingControls()
+        setupVoiceControls()
+        setupModeControls()
+        setupCropEditor()
+
+        uiVisibilityHandler.postDelayed(captureRunnable, 2000)
+        resetMenuButtonTimer()
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun setupXboxWebView() {
+        val webView = binding.xboxWebView
+        val settings = webView.settings
+        settings.javaScriptEnabled = true
+        settings.domStorageEnabled = true
+        settings.databaseEnabled = true
+        settings.mediaPlaybackRequiresUserGesture = false
+        settings.useWideViewPort = true
+        settings.loadWithOverviewMode = true
+        settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+        // Standard Chrome Mobile/Desktop compatible UA for Xbox Cloud & Remote Play
+        settings.userAgentString = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+
+        CookieManager.getInstance().setAcceptCookie(true)
+        CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
+
+        webView.webViewClient = object : WebViewClient() {
+            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                super.onPageStarted(view, url, favicon)
+                binding.progressBar.isVisible = true
+            }
+
+            override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                binding.progressBar.isVisible = false
+                if (url != null && url.contains("xbox.com")) {
+                    injectBetterXcloud(view)
+                    applyWebViewMuteState()
+                }
+            }
+        }
+
+        webView.webChromeClient = object : WebChromeClient() {
+            override fun onPermissionRequest(request: PermissionRequest?) {
+                request?.grant(request.resources)
+            }
+        }
+
+        webView.loadUrl("https://www.xbox.com/play")
+    }
+
+    private fun prefetchBetterXcloudScript() {
+        val cacheFile = File(filesDir, "better-xcloud.min.js")
+        if (cacheFile.exists() && cacheFile.length() > 1024) {
+            betterXcloudScript = cacheFile.readText()
+        }
+        ocrScope.launch(Dispatchers.IO) {
+            try {
+                val url = URL("https://cdn.jsdelivr.net/gh/redphx/better-xcloud@latest/dist/better-xcloud.min.js")
+                val conn = url.openConnection()
+                conn.connectTimeout = 5000
+                conn.readTimeout = 5000
+                val script = conn.getInputStream().bufferedReader().use { it.readText() }
+                if (script.length > 1024) {
+                    cacheFile.writeText(script)
+                    betterXcloudScript = script
+                }
+            } catch (_: Exception) {
+                // Keep cached copy if offline or CDN unreachable
+            }
+        }
+    }
+
+    private fun injectBetterXcloud(webView: WebView?) {
+        val script = betterXcloudScript ?: return
+        val wrapped = """
+            (function() {
+                if (window.__bxInjected) return;
+                window.__bxInjected = true;
+                try {
+                    $script
+                } catch (e) { console.error('Better xCloud inject error:', e); }
+            })();
+        """.trimIndent()
+        webView?.evaluateJavascript(wrapped, null)
+    }
+
+    private fun applyWebViewMuteState() {
+        val muted = isAudioMuted
+        val js = """
+            (function() {
+                window.__xboxTranslatorMuted = $muted;
+                document.querySelectorAll('video, audio').forEach(function(el) {
+                    el.muted = $muted;
+                });
+                if (!window.__xboxMuteObserver) {
+                    window.__xboxMuteObserver = new MutationObserver(function() {
+                        document.querySelectorAll('video, audio').forEach(function(el) {
+                            el.muted = !!window.__xboxTranslatorMuted;
+                        });
+                    });
+                    window.__xboxMuteObserver.observe(document.documentElement, { childList: true, subtree: true });
+                }
+            })();
+        """.trimIndent()
+        binding.xboxWebView.evaluateJavascript(js, null)
+    }
+
+    private fun setupMenuControls() {
+        binding.btnMenuToggle.setOnClickListener {
+            val show = !binding.menuPanelContainer.isVisible
+            binding.menuPanelContainer.isVisible = show
+            if (show) {
+                showMenuPage("MAIN")
+                binding.btnMenuToggle.alpha = 1.0f
+                uiVisibilityHandler.removeCallbacks(hideMenuButtonRunnable)
+            } else {
+                resetMenuButtonTimer()
+            }
+        }
+
+        binding.btnCloseMenu.setOnClickListener {
+            binding.menuPanelContainer.isVisible = false
+            resetMenuButtonTimer()
+        }
+
+        binding.btnMenuBack.setOnClickListener {
+            showMenuPage("MAIN")
+        }
+        binding.btnOpenSubText.setOnClickListener {
+            showMenuPage("TEXT")
+        }
+        binding.btnOpenSubVoice.setOnClickListener {
+            showMenuPage("VOICE")
+        }
+        binding.btnOpenSubMode.setOnClickListener {
+            showMenuPage("MODE")
+        }
+
+        binding.subOverlaySwitch.setOnCheckedChangeListener { _, isChecked ->
+            isSubtitleEnabled = isChecked
+            if (!isChecked) {
+                binding.subtitleOverlayContainer.isVisible = false
+                if (isTextOnlyMode) toggleTextOnlyMode(false)
+            } else if (subtitleHistory.isNotEmpty() && !isTextOnlyMode) {
+                binding.subtitleOverlayContainer.isVisible = true
+            }
+        }
+    }
+
+    private fun setupVoiceControls() {
+        binding.ttsVoiceSwitch.setOnCheckedChangeListener { _, isChecked ->
+            isTtsEnabled = isChecked
+            binding.voiceGenderContainer.isVisible = isChecked
+            binding.speechSpeedContainer.isVisible = isChecked
+            binding.ttsQueueModeContainer.isVisible = isChecked
+            if (!isChecked) {
+                activeUtterances.clear()
+                tts?.stop()
+            }
+        }
+
+        val savedVoiceMode = cropPrefs.getString("voice_gender_mode", VoiceGenderMode.AUTO_AI.name)
+        voiceGenderMode = try { VoiceGenderMode.valueOf(savedVoiceMode ?: VoiceGenderMode.AUTO_AI.name) } catch (_: Exception) { VoiceGenderMode.AUTO_AI }
+        when (voiceGenderMode) {
+            VoiceGenderMode.AUTO_AI -> binding.voiceGenderToggleGroup.check(R.id.btnVoiceAuto)
+            VoiceGenderMode.FEMALE -> binding.voiceGenderToggleGroup.check(R.id.btnVoiceFemale)
+            VoiceGenderMode.MALE -> binding.voiceGenderToggleGroup.check(R.id.btnVoiceMale)
+        }
+
+        binding.voiceGenderToggleGroup.addOnButtonCheckedListener { _, checkedId, isChecked ->
+            if (isChecked) {
+                voiceGenderMode = when (checkedId) {
+                    R.id.btnVoiceFemale -> VoiceGenderMode.FEMALE
+                    R.id.btnVoiceMale -> VoiceGenderMode.MALE
+                    else -> VoiceGenderMode.AUTO_AI
+                }
+                cropPrefs.edit().putString("voice_gender_mode", voiceGenderMode.name).apply()
+            }
+        }
+
+        speechSpeedRate = cropPrefs.getFloat("speech_speed_rate", 1.25f)
+        when {
+            speechSpeedRate <= 1.05f -> binding.speechSpeedToggleGroup.check(R.id.btnSpeedNormal)
+            speechSpeedRate <= 1.35f -> binding.speechSpeedToggleGroup.check(R.id.btnSpeedFast)
+            else -> binding.speechSpeedToggleGroup.check(R.id.btnSpeedVeryFast)
+        }
+
+        binding.speechSpeedToggleGroup.addOnButtonCheckedListener { _, checkedId, isChecked ->
+            if (isChecked) {
+                speechSpeedRate = when (checkedId) {
+                    R.id.btnSpeedNormal -> 1.0f
+                    R.id.btnSpeedFast -> 1.25f
+                    else -> 1.50f
+                }
+                cropPrefs.edit().putFloat("speech_speed_rate", speechSpeedRate).apply()
+            }
+        }
+
+        val savedQueueMode = cropPrefs.getString("tts_queue_mode", TtsQueueMode.SMART_QUEUE.name)
+        ttsQueueMode = try { TtsQueueMode.valueOf(savedQueueMode ?: TtsQueueMode.SMART_QUEUE.name) } catch (_: Exception) { TtsQueueMode.SMART_QUEUE }
+        when (ttsQueueMode) {
+            TtsQueueMode.QUEUE_ALL -> binding.ttsQueueModeToggleGroup.check(R.id.btnQueueAdd)
+            TtsQueueMode.FLUSH_IMMEDIATE -> binding.ttsQueueModeToggleGroup.check(R.id.btnQueueFlush)
+            TtsQueueMode.SMART_QUEUE -> binding.ttsQueueModeToggleGroup.check(R.id.btnQueueSmart)
+        }
+
+        binding.ttsQueueModeToggleGroup.addOnButtonCheckedListener { _, checkedId, isChecked ->
+            if (isChecked) {
+                ttsQueueMode = when (checkedId) {
+                    R.id.btnQueueAdd -> TtsQueueMode.QUEUE_ALL
+                    R.id.btnQueueFlush -> TtsQueueMode.FLUSH_IMMEDIATE
+                    else -> TtsQueueMode.SMART_QUEUE
+                }
+                cropPrefs.edit().putString("tts_queue_mode", ttsQueueMode.name).apply()
+            }
+        }
+
+        binding.btnMuteAudio.setOnClickListener {
+            isAudioMuted = !isAudioMuted
+            applyWebViewMuteState()
+            if (isAudioMuted) {
+                binding.btnMuteAudio.text = "เปิดเสียงเกม (กำลังปิดเสียงเกมอยู่)"
+                binding.btnMuteAudio.setIconResource(R.drawable.ic_volume_off)
+                Toast.makeText(this, "ปิดเสียงเกมแล้ว (ยังคงพากย์เสียงไทยตามปกติ)", Toast.LENGTH_SHORT).show()
+            } else {
+                binding.btnMuteAudio.text = "ปิดเสียงเกมจากมือถือ"
+                binding.btnMuteAudio.setIconResource(R.drawable.ic_volume_up)
+                Toast.makeText(this, "เปิดเสียงเกมปกติแล้ว", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    private fun setupModeControls() {
+        binding.btnAdjustCropBox.setOnClickListener {
+            binding.menuPanelContainer.isVisible = false
+            openCropEditor()
+        }
+
+        binding.filterShortTextSwitch.setOnCheckedChangeListener { _, isChecked ->
+            isFilterShortTextEnabled = isChecked
+            cropPrefs.edit().putBoolean("filter_short_ui", isChecked).apply()
+        }
+
+        binding.btnTextOnlyMode.setOnClickListener {
+            toggleTextOnlyMode(!isTextOnlyMode)
+            binding.menuPanelContainer.isVisible = false
+            resetMenuButtonTimer()
+        }
+
+        binding.pureFullscreenLayout.setOnClickListener {
+            toggleTextOnlyMode(false)
+        }
+
+        binding.btnReloadXbox.setOnClickListener {
+            binding.menuPanelContainer.isVisible = false
+            resetMenuButtonTimer()
+            binding.xboxWebView.loadUrl("https://www.xbox.com/play")
+            Toast.makeText(this, "กำลังรีโหลดหน้า Xbox...", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    override fun onInit(status: Int) {
+        if (status == TextToSpeech.SUCCESS) {
+            tts?.language = Locale("th", "TH")
+            tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                override fun onStart(utteranceId: String?) {}
+                override fun onDone(utteranceId: String?) {
+                    if (utteranceId != null) activeUtterances.remove(utteranceId)
+                }
+                override fun onError(utteranceId: String?) {
+                    if (utteranceId != null) activeUtterances.remove(utteranceId)
+                }
+                override fun onStop(utteranceId: String?, interrupted: Boolean) {
+                    if (utteranceId != null) activeUtterances.remove(utteranceId)
+                }
+            })
+        }
+    }
+
+    private fun captureAndTranslateFrame() {
+        if (isCapturing || isDestroyed || isFinishing) return
+        val webView = binding.xboxWebView
+        if (webView.width <= 0 || webView.height <= 0) return
+
+        val location = IntArray(2)
+        webView.getLocationInWindow(location)
+        val rect = Rect(location[0], location[1], location[0] + webView.width, location[1] + webView.height)
+        if (rect.width() <= 0 || rect.height() <= 0) return
+
+        val fullBitmap = Bitmap.createBitmap(webView.width, webView.height, Bitmap.Config.ARGB_8888)
+        isCapturing = true
+
+        try {
+            PixelCopy.request(window, rect, fullBitmap, { copyResult ->
+                isCapturing = false
+                if (copyResult == PixelCopy.SUCCESS) {
+                    try {
+                        val cropLeftNorm = cropPrefs.getFloat("crop_left", 0.18f).coerceIn(0f, 0.85f)
+                        val cropTopNorm = cropPrefs.getFloat("crop_top", 0.72f).coerceIn(0f, 0.90f)
+                        val cropWidthNorm = cropPrefs.getFloat("crop_width", 0.64f).coerceIn(0.10f, 1f - cropLeftNorm)
+                        val cropHeightNorm = cropPrefs.getFloat("crop_height", 0.22f).coerceIn(0.06f, 1f - cropTopNorm)
+
+                        val cropX = (fullBitmap.width * cropLeftNorm).toInt().coerceIn(0, fullBitmap.width - 1)
+                        val cropY = (fullBitmap.height * cropTopNorm).toInt().coerceIn(0, fullBitmap.height - 1)
+                        val cropW = (fullBitmap.width * cropWidthNorm).toInt().coerceIn(40, fullBitmap.width - cropX)
+                        val cropH = (fullBitmap.height * cropHeightNorm).toInt().coerceIn(30, fullBitmap.height - cropY)
+
+                        val subBitmap = Bitmap.createBitmap(fullBitmap, cropX, cropY, cropW, cropH)
+                        val scaledSub = Bitmap.createScaledBitmap(subBitmap, cropW * 2, cropH * 2, true)
+                        val image = InputImage.fromBitmap(scaledSub, 0)
+                        textRecognizer.process(image)
+                            .addOnSuccessListener { visionText ->
+                                val rawText = visionText.text.trim().replace("\n", " ")
+                                val fixedText = fixOcrText(rawText)
+                                val text = fixedText.replace(Regex("\\s+"), " ").trim()
+                                if (text.isNotEmpty() && isDialogueSubtitle(text)) {
+                                    val isDuplicateOfPending = isTranslating && isSimilarText(text, pendingOcrEnglish)
+                                    val isDuplicateOfLast = isSimilarText(text, lastTranslatedEnglish)
+                                    val isDuplicateOfRecent = subtitleHistory.take(2).any { isSimilarText(text, it.english) }
+
+                                    if (!isTranslating && !isDuplicateOfPending && !isDuplicateOfLast && !isDuplicateOfRecent) {
+                                        isTranslating = true
+                                        pendingOcrEnglish = text
+                                        ocrScope.launch {
+                                            try {
+                                                val thai = translateToThai(text)
+                                                val isDuplicateThai = isSimilarThai(thai, lastTranslatedThai) ||
+                                                    subtitleHistory.take(2).any { isSimilarThai(thai, it.thai) }
+                                                if (!isDuplicateThai) {
+                                                    lastTranslatedEnglish = text
+                                                    lastTranslatedThai = thai
+                                                    subtitleHistory.add(0, SubtitleHistoryItem(text, thai))
+                                                    while (subtitleHistory.size > maxHistoryLines) {
+                                                        subtitleHistory.removeAt(subtitleHistory.size - 1)
+                                                    }
+                                                    renderSubtitles()
+                                                    if (isTtsEnabled) {
+                                                        speakTranslation(text, thai)
+                                                    }
+                                                }
+                                            } finally {
+                                                isTranslating = false
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            .addOnCompleteListener {
+                                fullBitmap.recycle()
+                                subBitmap.recycle()
+                                scaledSub.recycle()
+                            }
+                    } catch (_: Exception) {
+                        fullBitmap.recycle()
+                    }
+                } else {
+                    fullBitmap.recycle()
+                }
+            }, Handler(Looper.getMainLooper()))
+        } catch (_: Exception) {
+            isCapturing = false
+            fullBitmap.recycle()
+        }
+    }
+
+    private fun setupSubtitleStylingControls() {
+        currentSubTextColor = try {
+            Color.parseColor(cropPrefs.getString("sub_text_color", "#00FF88") ?: "#00FF88")
+        } catch (_: Exception) {
+            Color.parseColor("#00FF88")
+        }
+        currentSubFontSize = cropPrefs.getInt("sub_font_size_sp", 26).coerceIn(16, 42)
+        currentSubPosition = cropPrefs.getString("sub_position", "CENTER") ?: "CENTER"
+        currentSubBgOpacity = cropPrefs.getInt("sub_bg_opacity", 80).coerceIn(0, 100)
+        maxHistoryLines = cropPrefs.getInt("sub_history_limit", 3).coerceIn(1, 3)
+
+        if (currentSubPosition == "BOTTOM") {
+            binding.positionToggleGroup.check(R.id.btnPosBottom)
+        } else {
+            binding.positionToggleGroup.check(R.id.btnPosCenter)
+        }
+        binding.positionToggleGroup.addOnButtonCheckedListener { _, checkedId, isChecked ->
+            if (isChecked) {
+                currentSubPosition = if (checkedId == R.id.btnPosBottom) "BOTTOM" else "CENTER"
+                cropPrefs.edit().putString("sub_position", currentSubPosition).apply()
+                applySubtitleStyling()
+            }
+        }
+
+        when (cropPrefs.getString("sub_text_color", "#00FF88")) {
+            "#FFFFFF" -> binding.colorToggleGroup.check(R.id.btnColorWhite)
+            "#00E5FF" -> binding.colorToggleGroup.check(R.id.btnColorCyan)
+            "#FFD700" -> binding.colorToggleGroup.check(R.id.btnColorYellow)
+            "#FF9100" -> binding.colorToggleGroup.check(R.id.btnColorOrange)
+            "#FF4081" -> binding.colorToggleGroup.check(R.id.btnColorPink)
+            else -> binding.colorToggleGroup.check(R.id.btnColorGreen)
+        }
+        binding.colorToggleGroup.addOnButtonCheckedListener { _, checkedId, isChecked ->
+            if (isChecked) {
+                val hexColor = when (checkedId) {
+                    R.id.btnColorWhite -> "#FFFFFF"
+                    R.id.btnColorCyan -> "#00E5FF"
+                    R.id.btnColorYellow -> "#FFD700"
+                    R.id.btnColorOrange -> "#FF9100"
+                    R.id.btnColorPink -> "#FF4081"
+                    else -> "#00FF88"
+                }
+                currentSubTextColor = Color.parseColor(hexColor)
+                cropPrefs.edit().putString("sub_text_color", hexColor).apply()
+                applySubtitleStyling()
+            }
+        }
+
+        syncFontSizeToggleUI()
+        binding.fontSizeToggleGroup.addOnButtonCheckedListener { _, checkedId, isChecked ->
+            if (isChecked) {
+                currentSubFontSize = when (checkedId) {
+                    R.id.btnSizeSmall -> 18
+                    R.id.btnSizeMedium -> 22
+                    R.id.btnSizeXLarge -> 34
+                    R.id.btnSizeXXLarge -> 40
+                    else -> 26
+                }
+                cropPrefs.edit().putInt("sub_font_size_sp", currentSubFontSize).apply()
+                syncFontSizeToggleUI()
+                applySubtitleStyling()
+            }
+        }
+        binding.btnFontDecrease.setOnClickListener {
+            currentSubFontSize = (currentSubFontSize - 2).coerceIn(16, 42)
+            cropPrefs.edit().putInt("sub_font_size_sp", currentSubFontSize).apply()
+            syncFontSizeToggleUI()
+            applySubtitleStyling()
+        }
+        binding.btnFontIncrease.setOnClickListener {
+            currentSubFontSize = (currentSubFontSize + 2).coerceIn(16, 42)
+            cropPrefs.edit().putInt("sub_font_size_sp", currentSubFontSize).apply()
+            syncFontSizeToggleUI()
+            applySubtitleStyling()
+        }
+
+        when (currentSubBgOpacity) {
+            0 -> binding.bgOpacityToggleGroup.check(R.id.btnOpacityTransparent)
+            40 -> binding.bgOpacityToggleGroup.check(R.id.btnOpacityGlass)
+            100 -> binding.bgOpacityToggleGroup.check(R.id.btnOpacitySolid)
+            else -> binding.bgOpacityToggleGroup.check(R.id.btnOpacityDark)
+        }
+        binding.bgOpacityToggleGroup.addOnButtonCheckedListener { _, checkedId, isChecked ->
+            if (isChecked) {
+                currentSubBgOpacity = when (checkedId) {
+                    R.id.btnOpacityTransparent -> 0
+                    R.id.btnOpacityGlass -> 40
+                    R.id.btnOpacitySolid -> 100
+                    else -> 80
+                }
+                cropPrefs.edit().putInt("sub_bg_opacity", currentSubBgOpacity).apply()
+                applySubtitleStyling()
+            }
+        }
+
+        when (maxHistoryLines) {
+            1 -> binding.historyLinesToggleGroup.check(R.id.btnHistory1)
+            2 -> binding.historyLinesToggleGroup.check(R.id.btnHistory2)
+            else -> binding.historyLinesToggleGroup.check(R.id.btnHistory3)
+        }
+        binding.historyLinesToggleGroup.addOnButtonCheckedListener { _, checkedId, isChecked ->
+            if (isChecked) {
+                maxHistoryLines = when (checkedId) {
+                    R.id.btnHistory1 -> 1
+                    R.id.btnHistory2 -> 2
+                    else -> 3
+                }
+                cropPrefs.edit().putInt("sub_history_limit", maxHistoryLines).apply()
+                while (subtitleHistory.size > maxHistoryLines) {
+                    subtitleHistory.removeAt(subtitleHistory.size - 1)
+                }
+                renderSubtitles()
+            }
+        }
+
+        applySubtitleStyling()
+    }
+
+    private fun syncFontSizeToggleUI() {
+        binding.tvCurrentFontSize.text = "${currentSubFontSize}sp"
+        when (currentSubFontSize) {
+            18 -> binding.fontSizeToggleGroup.check(R.id.btnSizeSmall)
+            22 -> binding.fontSizeToggleGroup.check(R.id.btnSizeMedium)
+            26 -> binding.fontSizeToggleGroup.check(R.id.btnSizeLarge)
+            34 -> binding.fontSizeToggleGroup.check(R.id.btnSizeXLarge)
+            40 -> binding.fontSizeToggleGroup.check(R.id.btnSizeXXLarge)
+            else -> binding.fontSizeToggleGroup.clearChecked()
+        }
+    }
+
+    private fun applySubtitleStyling() {
+        val lp = binding.subtitleOverlayContainer.layoutParams as android.widget.FrameLayout.LayoutParams
+        if (currentSubPosition == "BOTTOM") {
+            lp.gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            lp.bottomMargin = dpToPx(24)
+            lp.topMargin = 0
+        } else {
+            lp.gravity = Gravity.CENTER
+            lp.bottomMargin = 0
+            lp.topMargin = 0
+        }
+        binding.subtitleOverlayContainer.layoutParams = lp
+
+        val alphaInt = (currentSubBgOpacity * 255 / 100).coerceIn(0, 255)
+        val bgDrawable = GradientDrawable().apply {
+            setColor(Color.argb(alphaInt, 6, 8, 16))
+            cornerRadius = dpToPx(12).toFloat()
+            if (currentSubBgOpacity > 0) {
+                setStroke(dpToPx(1), Color.argb(60, 255, 255, 255))
+            }
+        }
+        binding.subtitleOverlayContainer.background = bgDrawable
+
+        binding.translatedSubText.setTextColor(currentSubTextColor)
+        binding.translatedSubText.setTextSize(TypedValue.COMPLEX_UNIT_SP, currentSubFontSize.toFloat())
+        binding.translatedSubText1.setTextColor(currentSubTextColor)
+        binding.translatedSubText1.setTextSize(TypedValue.COMPLEX_UNIT_SP, (currentSubFontSize * 0.85f).coerceAtLeast(14f))
+        binding.translatedSubText2.setTextColor(currentSubTextColor)
+        binding.translatedSubText2.setTextSize(TypedValue.COMPLEX_UNIT_SP, (currentSubFontSize * 0.78f).coerceAtLeast(13f))
+
+        val fullSize = (currentSubFontSize + 4).toFloat()
+        binding.pureFullscreenText.setTextColor(currentSubTextColor)
+        binding.pureFullscreenText.setTextSize(TypedValue.COMPLEX_UNIT_SP, fullSize)
+        binding.pureFullscreenText1.setTextColor(currentSubTextColor)
+        binding.pureFullscreenText1.setTextSize(TypedValue.COMPLEX_UNIT_SP, (fullSize * 0.85f).coerceAtLeast(16f))
+        binding.pureFullscreenText2.setTextColor(currentSubTextColor)
+        binding.pureFullscreenText2.setTextSize(TypedValue.COMPLEX_UNIT_SP, (fullSize * 0.72f).coerceAtLeast(14f))
+
+        val previewBg = GradientDrawable().apply {
+            setColor(Color.argb(alphaInt, 6, 8, 16))
+            cornerRadius = dpToPx(8).toFloat()
+            setStroke(dpToPx(1), Color.argb(60, 255, 255, 255))
+        }
+        binding.previewSubContainer.background = previewBg
+        binding.previewSubNew.setTextColor(currentSubTextColor)
+        binding.previewSubNew.setTextSize(TypedValue.COMPLEX_UNIT_SP, (currentSubFontSize * 0.7f).coerceIn(13f, 22f))
+        binding.previewSubOld.setTextColor(currentSubTextColor)
+        binding.previewSubOld.setTextSize(TypedValue.COMPLEX_UNIT_SP, (currentSubFontSize * 0.58f).coerceIn(11f, 18f))
+
+        renderSubtitles()
+    }
+
+    private fun showMenuPage(page: String) {
+        binding.menuMainPage.isVisible = (page == "MAIN")
+        binding.menuSubTextPage.isVisible = (page == "TEXT")
+        binding.menuSubVoicePage.isVisible = (page == "VOICE")
+        binding.menuSubModePage.isVisible = (page == "MODE")
+        binding.btnMenuBack.isVisible = (page != "MAIN")
+        binding.tvMenuTitle.text = when (page) {
+            "TEXT" -> "ปรับแต่งตัวหนังสือ"
+            "VOICE" -> "การออกเสียงพากย์"
+            "MODE" -> "โหมดและการแสดงผล"
+            else -> "ตั้งค่า Xbox Translator"
+        }
+    }
+
+    private fun renderSubtitles() {
+        if (subtitleHistory.isEmpty()) {
+            binding.subtitleOverlayContainer.isVisible = false
+            return
+        }
+
+        val item0 = subtitleHistory.getOrNull(0)
+        if (item0 != null) {
+            binding.originalSubText.text = item0.english
+            binding.translatedSubText.text = item0.thai
+            binding.layoutSubItem0.isVisible = true
+            binding.layoutSubItem0.alpha = 1.0f
+            binding.pureFullscreenText.text = item0.thai
+            binding.pureFullscreenText.alpha = 1.0f
+            binding.pureFullscreenText.isVisible = true
+        } else {
+            binding.layoutSubItem0.isVisible = false
+        }
+
+        val item1 = subtitleHistory.getOrNull(1)
+        if (item1 != null && maxHistoryLines >= 2) {
+            binding.translatedSubText1.text = item1.thai
+            binding.translatedSubText1.alpha = 0.65f
+            binding.translatedSubText1.isVisible = true
+            binding.pureFullscreenText1.text = item1.thai
+            binding.pureFullscreenText1.alpha = 0.55f
+            binding.pureFullscreenText1.isVisible = true
+        } else {
+            binding.translatedSubText1.isVisible = false
+            binding.pureFullscreenText1.isVisible = false
+        }
+
+        val item2 = subtitleHistory.getOrNull(2)
+        if (item2 != null && maxHistoryLines >= 3) {
+            binding.translatedSubText2.text = item2.thai
+            binding.translatedSubText2.alpha = 0.35f
+            binding.translatedSubText2.isVisible = true
+            binding.pureFullscreenText2.text = item2.thai
+            binding.pureFullscreenText2.alpha = 0.25f
+            binding.pureFullscreenText2.isVisible = true
+        } else {
+            binding.translatedSubText2.isVisible = false
+            binding.pureFullscreenText2.isVisible = false
+        }
+
+        if (isSubtitleEnabled && !isTextOnlyMode) {
+            binding.subtitleOverlayContainer.isVisible = true
+            binding.subtitleOverlayContainer.alpha = 1.0f
+        }
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    private fun setupCropEditor() {
+        var boxX = 0f
+        var boxY = 0f
+        var boxW = 0f
+        var boxH = 0f
+
+        var touchStartX = 0f
+        var touchStartY = 0f
+        var startBoxX = 0f
+        var startBoxY = 0f
+
+        binding.cropBoxFrame.setOnTouchListener { v, event ->
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    touchStartX = event.rawX
+                    touchStartY = event.rawY
+                    startBoxX = v.x
+                    startBoxY = v.y
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val parentW = binding.cropEditorOverlay.width
+                    val parentH = binding.cropEditorOverlay.height
+                    val dx = event.rawX - touchStartX
+                    val dy = event.rawY - touchStartY
+                    val newX = (startBoxX + dx).coerceIn(0f, (parentW - v.width).toFloat().coerceAtLeast(0f))
+                    val newY = (startBoxY + dy).coerceIn(0f, (parentH - v.height).toFloat().coerceAtLeast(0f))
+                    v.x = newX
+                    v.y = newY
+                    true
+                }
+                else -> false
+            }
+        }
+
+        binding.cropResizeHandle.setOnTouchListener { _, event ->
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    touchStartX = event.rawX
+                    touchStartY = event.rawY
+                    boxX = binding.cropBoxFrame.x
+                    boxY = binding.cropBoxFrame.y
+                    boxW = binding.cropBoxFrame.width.toFloat()
+                    boxH = binding.cropBoxFrame.height.toFloat()
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val parentW = binding.cropEditorOverlay.width
+                    val parentH = binding.cropEditorOverlay.height
+                    val dx = event.rawX - touchStartX
+                    val dy = event.rawY - touchStartY
+                    val newW = (boxW + dx).coerceIn(dpToPx(120).toFloat(), parentW - boxX)
+                    val newH = (boxH + dy).coerceIn(dpToPx(50).toFloat(), parentH - boxY)
+                    val params = binding.cropBoxFrame.layoutParams
+                    params.width = newW.toInt()
+                    params.height = newH.toInt()
+                    binding.cropBoxFrame.layoutParams = params
+                    true
+                }
+                else -> false
+            }
+        }
+
+        binding.btnSaveCropBox.setOnClickListener {
+            saveCropBox()
+        }
+
+        binding.btnResetCropBox.setOnClickListener {
+            cropPrefs.edit()
+                .putFloat("crop_left", 0.18f)
+                .putFloat("crop_top", 0.72f)
+                .putFloat("crop_width", 0.64f)
+                .putFloat("crop_height", 0.22f)
+                .apply()
+            openCropEditor()
+        }
+    }
+
+    private fun openCropEditor() {
+        binding.cropEditorOverlay.isVisible = true
+        binding.cropEditorOverlay.post {
+            val parentW = binding.cropEditorOverlay.width
+            val parentH = binding.cropEditorOverlay.height
+            if (parentW <= 0 || parentH <= 0) return@post
+
+            val leftNorm = cropPrefs.getFloat("crop_left", 0.18f)
+            val topNorm = cropPrefs.getFloat("crop_top", 0.72f)
+            val widthNorm = cropPrefs.getFloat("crop_width", 0.64f)
+            val heightNorm = cropPrefs.getFloat("crop_height", 0.22f)
+
+            val params = binding.cropBoxFrame.layoutParams
+            params.width = (parentW * widthNorm).toInt().coerceIn(dpToPx(120), parentW)
+            params.height = (parentH * heightNorm).toInt().coerceIn(dpToPx(50), parentH)
+            binding.cropBoxFrame.layoutParams = params
+
+            binding.cropBoxFrame.x = (parentW * leftNorm).coerceIn(0f, (parentW - params.width).toFloat())
+            binding.cropBoxFrame.y = (parentH * topNorm).coerceIn(0f, (parentH - params.height).toFloat())
+        }
+    }
+
+    private fun saveCropBox() {
+        val parentW = binding.cropEditorOverlay.width.toFloat()
+        val parentH = binding.cropEditorOverlay.height.toFloat()
+        if (parentW <= 0 || parentH <= 0) {
+            binding.cropEditorOverlay.isVisible = false
+            return
+        }
+
+        val leftNorm = (binding.cropBoxFrame.x / parentW).coerceIn(0f, 0.85f)
+        val topNorm = (binding.cropBoxFrame.y / parentH).coerceIn(0f, 0.90f)
+        val widthNorm = (binding.cropBoxFrame.width / parentW).coerceIn(0.10f, 1f - leftNorm)
+        val heightNorm = (binding.cropBoxFrame.height / parentH).coerceIn(0.06f, 1f - topNorm)
+
+        cropPrefs.edit()
+            .putFloat("crop_left", leftNorm)
+            .putFloat("crop_top", topNorm)
+            .putFloat("crop_width", widthNorm)
+            .putFloat("crop_height", heightNorm)
+            .apply()
+
+        binding.cropEditorOverlay.isVisible = false
+        resetMenuButtonTimer()
+        Toast.makeText(this, "บันทึกกรอบพื้นที่อ่านซับเรียบร้อยแล้ว", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun levenshteinDistance(s1: String, s2: String): Int {
+        val a = s1.lowercase()
+        val b = s2.lowercase()
+        val costs = IntArray(b.length + 1) { it }
+        for (i in 1..a.length) {
+            costs[0] = i
+            var nw = i - 1
+            for (j in 1..b.length) {
+                val cj = minOf(1 + minOf(costs[j], costs[j - 1]), if (a[i - 1] == b[j - 1]) nw else nw + 1)
+                nw = costs[j]
+                costs[j] = cj
+            }
+        }
+        return costs[b.length]
+    }
+
+    private fun isSimilarText(a: String, b: String): Boolean {
+        if (a.isBlank() || b.isBlank()) return false
+        if (a.equals(b, ignoreCase = true)) return true
+        val cleanA = a.lowercase().replace(Regex("[^a-z0-9 ]"), "").trim()
+        val cleanB = b.lowercase().replace(Regex("[^a-z0-9 ]"), "").trim()
+        if (cleanA.isEmpty() || cleanB.isEmpty()) return false
+        if (cleanA == cleanB) return true
+        val maxLen = maxOf(cleanA.length, cleanB.length)
+        val dist = levenshteinDistance(cleanA, cleanB)
+        return (1.0 - dist.toDouble() / maxLen) >= 0.72
+    }
+
+    private fun isSimilarThai(a: String, b: String): Boolean {
+        if (a.isBlank() || b.isBlank()) return false
+        val cleanA = a.replace(Regex("[\\s.,!?\"'()\\-…]"), "")
+        val cleanB = b.replace(Regex("[\\s.,!?\"'()\\-…]"), "")
+        if (cleanA.isEmpty() || cleanB.isEmpty()) return false
+        if (cleanA == cleanB) return true
+        val maxLen = maxOf(cleanA.length, cleanB.length)
+        val dist = levenshteinDistance(cleanA, cleanB)
+        return (1.0 - dist.toDouble() / maxLen) >= 0.80
+    }
+
+    private fun isDialogueSubtitle(text: String): Boolean {
+        if (!isFilterShortTextEnabled) return text.length >= 3 && text.any { it.isLetter() }
+
+        val words = text.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (words.size < 2 && text.length < 8) return false
+
+        val lower = text.lowercase()
+        val promptWords = setOf(
+            "talk", "skip", "attack", "dodge", "interact", "examine", "open", "back", "next", "continue", "menu", "cancel",
+            "lb", "rb", "lt", "rt", "ls", "rs", "r1", "r2", "l1", "l2"
+        )
+        if (words.size == 1 && promptWords.contains(lower)) return false
+        if (words.size == 2 && words.any { it.lowercase() in listOf("lb", "rb", "lt", "rt", "r1", "r2", "l1", "l2") }) return false
+
+        return text.any { it.isLetter() }
+    }
+
+    private fun dpToPx(dp: Int): Int {
+        return (dp * resources.displayMetrics.density).toInt()
+    }
+
+    private suspend fun translateToThai(englishText: String): String = withContext(Dispatchers.IO) {
+        try {
+            val url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=th&dt=t&q=" + URLEncoder.encode(englishText, "UTF-8")
+            val conn = URL(url).openConnection()
+            conn.setRequestProperty("User-Agent", "Mozilla/5.0")
+            conn.connectTimeout = 3000
+            conn.readTimeout = 3000
+            val res = conn.getInputStream().bufferedReader().use { it.readText() }
+            val json = JSONArray(res)
+            val sentences = json.getJSONArray(0)
+            val sb = StringBuilder()
+            for (i in 0 until sentences.length()) {
+                sb.append(sentences.getJSONArray(i).getString(0))
+            }
+            val result = sb.toString().trim()
+            if (result.isNotEmpty()) result else englishText
+        } catch (_: Exception) {
+            englishText
+        }
+    }
+
+    private fun isFemaleCharacter(englishText: String, thaiText: String): Boolean {
+        val engLower = englishText.lowercase()
+        val thaiLower = thaiText.lowercase()
+
+        var femaleScore = 0
+        var maleScore = 0
+
+        val femaleWords = listOf(
+            "she", "her", "hers", "lady", "milady", "girl", "woman", "women",
+            "sister", "mother", "queen", "princess", "madam", "miss", "mrs",
+            "daughter", "wife", "aunt", "witch", "goddess", "priestess", "empress"
+        )
+        for (w in femaleWords) {
+            if (Regex("\\b$w\\b").containsMatchIn(engLower)) femaleScore += 2
+        }
+        if (thaiLower.contains("ค่ะ") || thaiLower.contains("คะ") || thaiLower.contains("ดิฉัน") || thaiLower.contains("เจ้าแม่") || thaiLower.contains("นาง")) {
+            femaleScore += 3
+        }
+
+        val maleWords = listOf(
+            "he", "him", "his", "man", "men", "boy", "sir", "lord", "milord",
+            "brother", "father", "king", "prince", "mr", "son", "husband", "uncle",
+            "knight", "warrior", "chief", "master", "soldier", "dude", "bro", "guy"
+        )
+        for (w in maleWords) {
+            if (Regex("\\b$w\\b").containsMatchIn(engLower)) maleScore += 2
+        }
+        if (thaiLower.contains("ครับ") || thaiLower.contains("ผม") || thaiLower.contains("กระผม") || thaiLower.contains("ท่านชาย") || thaiLower.contains("ข้า")) {
+            maleScore += 3
+        }
+
+        val namePrefixesFemale = listOf("ellie", "lara", "chloe", "nadine", "aloy", "tifa", "aerith", "jill", "claire", "ada", "yennefer", "ciri", "triss", "freya", "selene", "lucia")
+        for (name in namePrefixesFemale) {
+            if (engLower.startsWith(name) || engLower.contains("$name:")) femaleScore += 5
+        }
+
+        val namePrefixesMale = listOf("joel", "kratos", "nathan", "drake", "leon", "chris", "geralt", "arthur", "john", "dante", "vergil", "cloud", "barret", "jason", "master chief")
+        for (name in namePrefixesMale) {
+            if (engLower.startsWith(name) || engLower.contains("$name:")) maleScore += 5
+        }
+
+        return femaleScore > maleScore
+    }
+
+    private fun fixOcrText(raw: String): String {
+        var s = raw
+        s = s.replace("vv", "w").replace("VV", "W")
+        s = s.replace("rn", "m")
+        s = s.replace("thc", "the").replace("Thc", "The").replace("THC", "THE")
+        s = s.replace("hcre", "here").replace("Hcre", "Here")
+        s = s.replace("whcre", "where").replace("Whcre", "Where")
+        s = s.replace("thcre", "there").replace("Thcre", "There")
+        s = s.replace("thcm", "them").replace("Thcm", "Them")
+        s = s.replace("thcy", "they").replace("Thcy", "They")
+        s = s.replace("thcse", "these").replace("thcso", "these")
+        s = s.replace("somc", "some").replace("Somc", "Some")
+        s = s.replace("comc", "come").replace("Comc", "Come")
+        s = s.replace("havc", "have").replace("Havc", "Have")
+        s = s.replace("makc", "make").replace("Makc", "Make")
+        s = s.replace("takc", "take").replace("Takc", "Take")
+        s = s.replace("givc", "give").replace("Givc", "Give")
+        s = s.replace("likc", "like").replace("Likc", "Like")
+        s = s.replace("timc", "time").replace("Timc", "Time")
+        s = s.replace("knowlc", "knowle")
+        s = s.replace("whcn", "when").replace("Whcn", "When")
+        s = s.replace("thcn", "then").replace("Thcn", "Then")
+        s = s.replace("wcre", "were").replace("Wcre", "Were")
+        s = s.replace("arce", "are").replace("arc ", "are ")
+        s = s.replace("becn", "been").replace("scce", "see")
+        s = s.replace("nccd", "need").replace("Nccd", "Need")
+        s = s.replace("fcel", "feel").replace("kccp", "keep")
+        s = s.replace("bcfore", "before").replace("bctter", "better")
+        s = s.replace("evcry", "every").replace("ncver", "never")
+        s = s.replace("ovcr", "over").replace("undcr", "under")
+        s = s.replace("aftcr", "after").replace("watcr", "water")
+        s = s.replace("peoplc", "people").replace("littlc", "little")
+        s = s.replace("bclieve", "believe").replace("frcend", "friend")
+        s = s.replace("shc ", "she ").replace("Shc ", "She ")
+        s = s.replace("hc ", "he ").replace("Hc ", "He ")
+        s = s.replace("wc ", "we ").replace("Wc ", "We ")
+        s = s.replace("mc ", "me ").replace("bc ", "be ")
+        s = s.replace("0f", "of").replace("0n", "on").replace("t0", "to")
+        s = s.replace("|", "I").replace("!", "l").replace("1", "l")
+        s = s.replace(Regex("(?<=\\w)\\.(?=\\w)"), "")
+        return s.trim()
+    }
+
+    private fun toggleTextOnlyMode(enable: Boolean) {
+        isTextOnlyMode = enable
+        if (enable) {
+            binding.pureFullscreenLayout.isVisible = true
+            binding.subtitleOverlayContainer.isVisible = false
+            binding.btnTextOnlyMode.text = "กลับสู่หน้าจอเกมปกติ"
+            if (subtitleHistory.isNotEmpty()) {
+                renderSubtitles()
+            } else {
+                binding.pureFullscreenText.text = "Xbox Translator\n(รอรับข้อความซับไตเติ้ลจากเกม...)"
+                binding.pureFullscreenText.isVisible = true
+                binding.pureFullscreenText1.isVisible = false
+                binding.pureFullscreenText2.isVisible = false
+            }
+        } else {
+            binding.pureFullscreenLayout.isVisible = false
+            binding.btnTextOnlyMode.text = "โหมดโชว์เฉพาะตัวหนังสือ (จอดำ)"
+            if (isSubtitleEnabled && subtitleHistory.isNotEmpty()) {
+                binding.subtitleOverlayContainer.isVisible = true
+            }
+        }
+    }
+
+    private fun resetMenuButtonTimer() {
+        uiVisibilityHandler.removeCallbacks(hideMenuButtonRunnable)
+        binding.btnMenuToggle.alpha = 1.0f
+        uiVisibilityHandler.postDelayed(hideMenuButtonRunnable, 4000)
+    }
+
+    private fun speakTranslation(englishText: String, thaiText: String) {
+        val ttsEngine = tts ?: return
+        val now = System.currentTimeMillis()
+        if (isSimilarThai(thaiText, lastSpokenThai) && (now - lastSpokenTimeMs) < 8000) {
+            return
+        }
+        lastSpokenThai = thaiText
+        lastSpokenTimeMs = now
+
+        val isFemale = when (voiceGenderMode) {
+            VoiceGenderMode.AUTO_AI -> isFemaleCharacter(englishText, thaiText)
+            VoiceGenderMode.FEMALE -> true
+            VoiceGenderMode.MALE -> false
+        }
+
+        try {
+            val voices = ttsEngine.voices
+            if (voices != null) {
+                val thVoices = voices.filter { it.locale.language.equals("th", ignoreCase = true) }
+                if (thVoices.isNotEmpty()) {
+                    val targetVoice = if (isFemale) {
+                        thVoices.firstOrNull { v ->
+                            val name = v.name.lowercase()
+                            (name.contains("female") || name.contains("woman") || name.contains("thb") || name.contains("thc") || name.contains("cfn") || name.contains("-b-") || name.contains("-c-"))
+                        } ?: if (thVoices.size > 1) thVoices[1] else thVoices.first()
+                    } else {
+                        thVoices.firstOrNull { v ->
+                            val name = v.name.lowercase()
+                            (!name.contains("female") && (name.contains("male") || name.contains("man"))) || name.contains("tha") || name.contains("thd") || name.contains("cfa") || name.contains("-a-") || name.contains("-d-")
+                        } ?: thVoices.first()
+                    }
+                    if (targetVoice != null) {
+                        ttsEngine.voice = targetVoice
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+
+        if (isFemale) {
+            ttsEngine.setPitch(1.15f)
+        } else {
+            ttsEngine.setPitch(0.75f)
+        }
+        ttsEngine.setSpeechRate(speechSpeedRate)
+
+        val utteranceId = "sub_voice_${now}"
+        val queueMode = when (ttsQueueMode) {
+            TtsQueueMode.QUEUE_ALL -> TextToSpeech.QUEUE_ADD
+            TtsQueueMode.FLUSH_IMMEDIATE -> {
+                activeUtterances.clear()
+                TextToSpeech.QUEUE_FLUSH
+            }
+            TtsQueueMode.SMART_QUEUE -> {
+                if (!ttsEngine.isSpeaking || activeUtterances.size <= 1) {
+                    TextToSpeech.QUEUE_ADD
+                } else {
+                    activeUtterances.clear()
+                    TextToSpeech.QUEUE_FLUSH
+                }
+            }
+        }
+        activeUtterances.add(utteranceId)
+        ttsEngine.speak(thaiText, queueMode, null, utteranceId)
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onBackPressed() {
+        if (binding.menuPanelContainer.isVisible) {
+            binding.menuPanelContainer.isVisible = false
+            resetMenuButtonTimer()
+            return
+        }
+        if (binding.cropEditorOverlay.isVisible) {
+            binding.cropEditorOverlay.isVisible = false
+            resetMenuButtonTimer()
+            return
+        }
+        if (binding.xboxWebView.canGoBack()) {
+            binding.xboxWebView.goBack()
+            return
+        }
+        super.onBackPressed()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        uiVisibilityHandler.removeCallbacks(captureRunnable)
+        uiVisibilityHandler.removeCallbacks(hideMenuButtonRunnable)
+        activeUtterances.clear()
+        ocrScope.cancel()
+        tts?.stop()
+        tts?.shutdown()
+        binding.xboxWebView.destroy()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) {
+            hideSystemUI()
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun hideSystemUI() {
+        window.decorView.systemUiVisibility = (
+            View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                or View.SYSTEM_UI_FLAG_FULLSCREEN
+            )
+    }
+}
