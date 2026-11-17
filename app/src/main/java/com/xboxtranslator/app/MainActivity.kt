@@ -14,6 +14,8 @@ import android.media.AudioAttributes
 import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
+import android.media.MediaPlayer
+import android.media.PlaybackParams
 import android.os.*
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
@@ -21,6 +23,7 @@ import android.util.Base64
 import android.util.TypedValue
 import android.view.*
 import android.webkit.*
+import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
@@ -89,6 +92,31 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private var currentSubFontSize = 26
     private var currentSubPosition = "CENTER"
     private var currentSubBgOpacity = 80
+
+    // Gemini API settings
+    private var geminiApiKey = ""
+    private var isGeminiTranslateEnabled = true
+    private var isGeminiTtsEnabled = true
+    private var geminiMediaPlayer: MediaPlayer? = null
+    private val geminiAudioQueue = java.util.ArrayDeque<java.io.File>()
+
+    // On-demand Note/Tutorial Crop Box & Top Quick Drawer
+    private var isEditingNoteCrop = false
+    private var isScanningNote = false
+    private var lastNoteThai = ""
+    private var lastNoteEnglish = ""
+
+    private val hideNoteCardRunnable = Runnable {
+        if (::binding.isInitialized && !isDestroyed && !isFinishing) {
+            hideNoteTranslationCard()
+        }
+    }
+
+    private val hideTopDrawerRunnable = Runnable {
+        if (::binding.isInitialized && !isDestroyed && !isFinishing) {
+            closeTopQuickDrawer()
+        }
+    }
 
     private var betterXcloudScript: String? = null
 
@@ -273,28 +301,49 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         binding.btnOpenSubMode.setOnClickListener {
             showMenuPage("MODE")
         }
+        binding.btnOpenSubApi.setOnClickListener {
+            showMenuPage("API")
+        }
 
+        setupGeminiApiControls()
+        setupTopQuickDrawer()
+        setupNoteTranslationFeature()
+
+        // Subtitle overlay switch (persisted)
+        isSubtitleEnabled = cropPrefs.getBoolean("sub_overlay_enabled", true)
+        binding.subOverlaySwitch.isChecked = isSubtitleEnabled
         binding.subOverlaySwitch.setOnCheckedChangeListener { _, isChecked ->
             isSubtitleEnabled = isChecked
+            cropPrefs.edit().putBoolean("sub_overlay_enabled", isChecked).apply()
             if (!isChecked) {
                 binding.subtitleOverlayContainer.isVisible = false
                 if (isTextOnlyMode) toggleTextOnlyMode(false)
             } else if (subtitleHistory.isNotEmpty() && !isTextOnlyMode) {
                 binding.subtitleOverlayContainer.isVisible = true
             }
+            updateQuickDrawerUI()
         }
     }
 
     private fun setupVoiceControls() {
+        // TTS voice switch (persisted)
+        isTtsEnabled = cropPrefs.getBoolean("tts_voice_enabled", false)
+        binding.ttsVoiceSwitch.isChecked = isTtsEnabled
+        binding.voiceGenderContainer.isVisible = isTtsEnabled
+        binding.speechSpeedContainer.isVisible = isTtsEnabled
+        binding.ttsQueueModeContainer.isVisible = isTtsEnabled
         binding.ttsVoiceSwitch.setOnCheckedChangeListener { _, isChecked ->
             isTtsEnabled = isChecked
+            cropPrefs.edit().putBoolean("tts_voice_enabled", isChecked).apply()
             binding.voiceGenderContainer.isVisible = isChecked
             binding.speechSpeedContainer.isVisible = isChecked
             binding.ttsQueueModeContainer.isVisible = isChecked
             if (!isChecked) {
                 activeUtterances.clear()
                 tts?.stop()
+                stopGeminiAudioPlayback()
             }
+            updateQuickDrawerUI()
         }
 
         val savedVoiceMode = cropPrefs.getString("voice_gender_mode", VoiceGenderMode.AUTO_AI.name)
@@ -371,6 +420,13 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private fun setupModeControls() {
         binding.btnAdjustCropBox.setOnClickListener {
             binding.menuPanelContainer.isVisible = false
+            isEditingNoteCrop = false
+            openCropEditor()
+        }
+
+        binding.btnAdjustNoteCropBox.setOnClickListener {
+            binding.menuPanelContainer.isVisible = false
+            isEditingNoteCrop = true
             openCropEditor()
         }
 
@@ -422,7 +478,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
 
     private fun captureAndTranslateFrame() {
-        if (isCapturing || isDestroyed || isFinishing) return
+        if (isCapturing || isScanningNote || isDestroyed || isFinishing) return
         val webView = binding.xboxWebView
         if (webView.width <= 0 || webView.height <= 0) return
 
@@ -797,12 +853,68 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         binding.menuSubTextPage.isVisible = (page == "TEXT")
         binding.menuSubVoicePage.isVisible = (page == "VOICE")
         binding.menuSubModePage.isVisible = (page == "MODE")
+        binding.menuSubApiPage.isVisible = (page == "API")
         binding.btnMenuBack.isVisible = (page != "MAIN")
         binding.tvMenuTitle.text = when (page) {
             "TEXT" -> "ปรับแต่งตัวหนังสือ"
             "VOICE" -> "การออกเสียงพากย์"
             "MODE" -> "โหมดและการแสดงผล"
+            "API" -> "ตั้งค่า Gemini API"
             else -> "ตั้งค่า XB Translator"
+        }
+    }
+
+    private fun setupGeminiApiControls() {
+        geminiApiKey = cropPrefs.getString("gemini_api_key", "")?.trim() ?: ""
+        isGeminiTranslateEnabled = cropPrefs.getBoolean("gemini_translate_enabled", true)
+        isGeminiTtsEnabled = cropPrefs.getBoolean("gemini_tts_enabled", true)
+
+        binding.etGeminiApiKey.setText(geminiApiKey)
+        binding.useGeminiTranslateSwitch.isChecked = isGeminiTranslateEnabled
+        binding.useGeminiTtsSwitch.isChecked = isGeminiTtsEnabled
+        updateGeminiApiStatusUI()
+
+        binding.btnSaveGeminiApiKey.setOnClickListener {
+            val key = binding.etGeminiApiKey.text?.toString()?.trim() ?: ""
+            geminiApiKey = key
+            cropPrefs.edit().putString("gemini_api_key", key).apply()
+            updateGeminiApiStatusUI()
+            if (key.isNotEmpty()) {
+                Toast.makeText(this, "บันทึก Gemini API Key เรียบร้อยแล้ว", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this, "ยังไม่ได้กรอก API Key (ใช้ระบบฟรีเดิม)", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        binding.btnClearGeminiApiKey.setOnClickListener {
+            geminiApiKey = ""
+            binding.etGeminiApiKey.setText("")
+            cropPrefs.edit().remove("gemini_api_key").apply()
+            updateGeminiApiStatusUI()
+            Toast.makeText(this, "ล้าง API Key แล้ว (กลับไปใช้ระบบฟรีเดิม)", Toast.LENGTH_SHORT).show()
+        }
+
+        binding.useGeminiTranslateSwitch.setOnCheckedChangeListener { _, isChecked ->
+            isGeminiTranslateEnabled = isChecked
+            cropPrefs.edit().putBoolean("gemini_translate_enabled", isChecked).apply()
+        }
+
+        binding.useGeminiTtsSwitch.setOnCheckedChangeListener { _, isChecked ->
+            isGeminiTtsEnabled = isChecked
+            cropPrefs.edit().putBoolean("gemini_tts_enabled", isChecked).apply()
+            if (!isChecked) {
+                stopGeminiAudioPlayback()
+            }
+        }
+    }
+
+    private fun updateGeminiApiStatusUI() {
+        if (geminiApiKey.isNotEmpty()) {
+            binding.tvGeminiApiStatus.text = "สถานะ: เชื่อมต่อ Gemini API แล้ว (พร้อมใช้งาน)"
+            binding.tvGeminiApiStatus.setTextColor(Color.parseColor("#00E676"))
+        } else {
+            binding.tvGeminiApiStatus.text = "สถานะ: ใช้ระบบแปลฟรี + TTS ในเครื่อง"
+            binding.tvGeminiApiStatus.setTextColor(Color.parseColor("#AAAAAA"))
         }
     }
 
@@ -926,27 +1038,38 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
 
         binding.btnResetCropBox.setOnClickListener {
+            val prefix = if (isEditingNoteCrop) "note_crop_" else "crop_"
             cropPrefs.edit()
-                .putFloat("crop_left", 0.18f)
-                .putFloat("crop_top", 0.72f)
-                .putFloat("crop_width", 0.64f)
-                .putFloat("crop_height", 0.22f)
+                .putFloat("${prefix}left", if (isEditingNoteCrop) 0.20f else 0.18f)
+                .putFloat("${prefix}top", if (isEditingNoteCrop) 0.15f else 0.72f)
+                .putFloat("${prefix}width", if (isEditingNoteCrop) 0.60f else 0.64f)
+                .putFloat("${prefix}height", if (isEditingNoteCrop) 0.65f else 0.22f)
                 .apply()
             openCropEditor()
         }
     }
 
     private fun openCropEditor() {
+        if (isEditingNoteCrop) {
+            binding.cropEditorTitle.text = "ลากกรอบสีฟ้าไปวางตรงพื้นที่เอกสาร/คำแนะนำ"
+            binding.cropBoxGuideText.text = "กรอบแปลเฉพาะจุด (ลากเพื่อย้าย)"
+            binding.cropBoxGuideText.setTextColor(Color.parseColor("#00E5FF"))
+        } else {
+            binding.cropEditorTitle.text = "ลากกรอบสีเขียวไปวางตรงพื้นที่ซับไตเติ้ลเกม"
+            binding.cropBoxGuideText.text = "กรอบอ่านซับ (ลากเพื่อย้าย)"
+            binding.cropBoxGuideText.setTextColor(Color.parseColor("#00E676"))
+        }
         binding.cropEditorOverlay.isVisible = true
         binding.cropEditorOverlay.post {
             val parentW = binding.cropEditorOverlay.width
             val parentH = binding.cropEditorOverlay.height
             if (parentW <= 0 || parentH <= 0) return@post
 
-            val leftNorm = cropPrefs.getFloat("crop_left", 0.18f)
-            val topNorm = cropPrefs.getFloat("crop_top", 0.72f)
-            val widthNorm = cropPrefs.getFloat("crop_width", 0.64f)
-            val heightNorm = cropPrefs.getFloat("crop_height", 0.22f)
+            val prefix = if (isEditingNoteCrop) "note_crop_" else "crop_"
+            val leftNorm = cropPrefs.getFloat("${prefix}left", if (isEditingNoteCrop) 0.20f else 0.18f)
+            val topNorm = cropPrefs.getFloat("${prefix}top", if (isEditingNoteCrop) 0.15f else 0.72f)
+            val widthNorm = cropPrefs.getFloat("${prefix}width", if (isEditingNoteCrop) 0.60f else 0.64f)
+            val heightNorm = cropPrefs.getFloat("${prefix}height", if (isEditingNoteCrop) 0.65f else 0.22f)
 
             val params = binding.cropBoxFrame.layoutParams
             params.width = (parentW * widthNorm).toInt().coerceIn(dpToPx(120), parentW)
@@ -971,16 +1094,248 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         val widthNorm = (binding.cropBoxFrame.width / parentW).coerceIn(0.10f, 1f - leftNorm)
         val heightNorm = (binding.cropBoxFrame.height / parentH).coerceIn(0.06f, 1f - topNorm)
 
+        val prefix = if (isEditingNoteCrop) "note_crop_" else "crop_"
         cropPrefs.edit()
-            .putFloat("crop_left", leftNorm)
-            .putFloat("crop_top", topNorm)
-            .putFloat("crop_width", widthNorm)
-            .putFloat("crop_height", heightNorm)
+            .putFloat("${prefix}left", leftNorm)
+            .putFloat("${prefix}top", topNorm)
+            .putFloat("${prefix}width", widthNorm)
+            .putFloat("${prefix}height", heightNorm)
             .apply()
 
         binding.cropEditorOverlay.isVisible = false
         resetMenuButtonTimer()
-        Toast.makeText(this, "บันทึกกรอบพื้นที่อ่านซับเรียบร้อยแล้ว", Toast.LENGTH_SHORT).show()
+        val msg = if (isEditingNoteCrop) "บันทึกกรอบแปลเฉพาะจุด (เอกสาร/คำแนะนำ) แล้ว" else "บันทึกกรอบพื้นที่อ่านซับเรียบร้อยแล้ว"
+        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    private fun setupTopQuickDrawer() {
+        var startY = 0f
+        binding.topDrawerHandle.setOnTouchListener { _, event ->
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    startY = event.rawY
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    val dy = event.rawY - startY
+                    if (dy > dpToPx(12) || kotlin.math.abs(dy) < dpToPx(12)) {
+                        openTopQuickDrawer()
+                    }
+                    true
+                }
+                else -> false
+            }
+        }
+
+        binding.btnQuickTts.setOnClickListener {
+            binding.ttsVoiceSwitch.isChecked = !binding.ttsVoiceSwitch.isChecked
+            updateQuickDrawerUI()
+            resetTopDrawerTimer()
+        }
+
+        binding.btnQuickMuteGame.setOnClickListener {
+            binding.btnMuteAudio.performClick()
+            updateQuickDrawerUI()
+            resetTopDrawerTimer()
+        }
+
+        binding.btnQuickSub.setOnClickListener {
+            binding.subOverlaySwitch.isChecked = !binding.subOverlaySwitch.isChecked
+            updateQuickDrawerUI()
+            resetTopDrawerTimer()
+        }
+        updateQuickDrawerUI()
+    }
+
+    private fun openTopQuickDrawer() {
+        updateQuickDrawerUI()
+        binding.topDrawerHandle.isVisible = false
+        binding.topQuickDrawerPanel.isVisible = true
+        binding.topQuickDrawerPanel.translationY = -dpToPx(60).toFloat()
+        binding.topQuickDrawerPanel.alpha = 0f
+        binding.topQuickDrawerPanel.animate()
+            .translationY(0f)
+            .alpha(1f)
+            .setDuration(180)
+            .start()
+        resetTopDrawerTimer()
+    }
+
+    private fun closeTopQuickDrawer() {
+        uiVisibilityHandler.removeCallbacks(hideTopDrawerRunnable)
+        if (!binding.topQuickDrawerPanel.isVisible) return
+        binding.topQuickDrawerPanel.animate()
+            .translationY(-dpToPx(60).toFloat())
+            .alpha(0f)
+            .setDuration(180)
+            .withEndAction {
+                binding.topQuickDrawerPanel.isVisible = false
+                binding.topDrawerHandle.isVisible = true
+            }
+            .start()
+    }
+
+    private fun resetTopDrawerTimer() {
+        uiVisibilityHandler.removeCallbacks(hideTopDrawerRunnable)
+        uiVisibilityHandler.postDelayed(hideTopDrawerRunnable, 4000)
+    }
+
+    private fun updateQuickDrawerUI() {
+        if (!::binding.isInitialized) return
+        binding.btnQuickTts.text = if (isTtsEnabled) "พากย์: เปิด" else "พากย์: ปิด"
+        binding.btnQuickTts.setTextColor(Color.parseColor(if (isTtsEnabled) "#00FF88" else "#FFFFFF"))
+        binding.btnQuickTts.strokeColor = android.content.res.ColorStateList.valueOf(Color.parseColor(if (isTtsEnabled) "#00FF88" else "#66FFFFFF"))
+
+        binding.btnQuickMuteGame.text = if (isAudioMuted) "เสียงเกม: ปิด" else "เสียงเกม: เปิด"
+        binding.btnQuickMuteGame.setTextColor(Color.parseColor(if (isAudioMuted) "#FF6B6B" else "#FFFFFF"))
+        binding.btnQuickMuteGame.strokeColor = android.content.res.ColorStateList.valueOf(Color.parseColor(if (isAudioMuted) "#FF6B6B" else "#66FFFFFF"))
+
+        binding.btnQuickSub.text = if (isSubtitleEnabled) "ซับ: เปิด" else "ซับ: ปิด"
+        binding.btnQuickSub.setTextColor(Color.parseColor(if (isSubtitleEnabled) "#00FF88" else "#FFFFFF"))
+        binding.btnQuickSub.strokeColor = android.content.res.ColorStateList.valueOf(Color.parseColor(if (isSubtitleEnabled) "#00FF88" else "#66FFFFFF"))
+    }
+
+    private fun setupNoteTranslationFeature() {
+        binding.btnScanNoteFloat.setOnClickListener {
+            captureAndTranslateNote()
+        }
+        binding.btnCloseNote.setOnClickListener {
+            hideNoteTranslationCard()
+        }
+        binding.btnSpeakNote.setOnClickListener {
+            if (lastNoteThai.isNotEmpty()) {
+                val isFemale = when (voiceGenderMode) {
+                    VoiceGenderMode.AUTO_AI -> isFemaleCharacter(lastNoteEnglish, lastNoteThai)
+                    VoiceGenderMode.FEMALE -> true
+                    VoiceGenderMode.MALE -> false
+                }
+                val now = System.currentTimeMillis()
+                if (geminiApiKey.isNotEmpty() && isGeminiTtsEnabled) {
+                    ocrScope.launch {
+                        val wavFile = withContext(Dispatchers.IO) {
+                            synthesizeGeminiTts(lastNoteThai, isFemale, now)
+                        }
+                        if (wavFile != null && !isDestroyed && !isFinishing) {
+                            enqueueGeminiAudio(wavFile)
+                        } else if (!isDestroyed && !isFinishing) {
+                            speakWithLocalTts(lastNoteThai, isFemale, now)
+                        }
+                    }
+                } else {
+                    speakWithLocalTts(lastNoteThai, isFemale, now)
+                }
+            }
+            uiVisibilityHandler.removeCallbacks(hideNoteCardRunnable)
+            uiVisibilityHandler.postDelayed(hideNoteCardRunnable, 20000)
+        }
+    }
+
+    private fun captureAndTranslateNote() {
+        val webView = binding.xboxWebView
+        if (webView.width <= 0 || webView.height <= 0) {
+            Toast.makeText(this, "ยังไม่พบภาพสตรีมสำหรับสแกน", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (isScanningNote) return
+
+        val location = IntArray(2)
+        webView.getLocationInWindow(location)
+        val rect = Rect(location[0], location[1], location[0] + webView.width, location[1] + webView.height)
+        if (rect.width() <= 0 || rect.height() <= 0) return
+
+        isScanningNote = true
+        binding.btnScanNoteFloat.text = "กำลังแปล..."
+        val fullBitmap = Bitmap.createBitmap(webView.width, webView.height, Bitmap.Config.ARGB_8888)
+
+        try {
+            PixelCopy.request(window, rect, fullBitmap, { copyResult ->
+                if (copyResult == PixelCopy.SUCCESS) {
+                    try {
+                        val cropLeftNorm = cropPrefs.getFloat("note_crop_left", 0.20f).coerceIn(0f, 0.85f)
+                        val cropTopNorm = cropPrefs.getFloat("note_crop_top", 0.15f).coerceIn(0f, 0.90f)
+                        val cropWidthNorm = cropPrefs.getFloat("note_crop_width", 0.60f).coerceIn(0.10f, 1f - cropLeftNorm)
+                        val cropHeightNorm = cropPrefs.getFloat("note_crop_height", 0.65f).coerceIn(0.06f, 1f - cropTopNorm)
+
+                        val cropX = (fullBitmap.width * cropLeftNorm).toInt().coerceIn(0, fullBitmap.width - 1)
+                        val cropY = (fullBitmap.height * cropTopNorm).toInt().coerceIn(0, fullBitmap.height - 1)
+                        val cropW = (fullBitmap.width * cropWidthNorm).toInt().coerceIn(40, fullBitmap.width - cropX)
+                        val cropH = (fullBitmap.height * cropHeightNorm).toInt().coerceIn(30, fullBitmap.height - cropY)
+
+                        val subBitmap = Bitmap.createBitmap(fullBitmap, cropX, cropY, cropW, cropH)
+                        val image = InputImage.fromBitmap(subBitmap, 0)
+                        textRecognizer.process(image)
+                            .addOnSuccessListener { visionText ->
+                                val blocks = visionText.textBlocks
+                                    .sortedWith(compareBy({ it.boundingBox?.top ?: 0 }, { it.boundingBox?.left ?: 0 }))
+                                    .mapNotNull { block ->
+                                        val t = block.text.trim().replace(Regex("\\s+"), " ")
+                                        if (t.length >= 2) t else null
+                                    }
+                                val rawNote = blocks.joinToString("\n")
+                                if (rawNote.isBlank()) {
+                                    isScanningNote = false
+                                    binding.btnScanNoteFloat.text = "แปลเฉพาะจุด"
+                                    Toast.makeText(this, "ไม่พบข้อความในกรอบเฉพาะจุด", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    ocrScope.launch {
+                                        try {
+                                            val thai = translateToThai(rawNote)
+                                            lastNoteEnglish = rawNote
+                                            lastNoteThai = thai
+                                            showNoteTranslationCard(rawNote, thai)
+                                        } finally {
+                                            isScanningNote = false
+                                            binding.btnScanNoteFloat.text = "แปลเฉพาะจุด"
+                                        }
+                                    }
+                                }
+                            }
+                            .addOnFailureListener {
+                                isScanningNote = false
+                                binding.btnScanNoteFloat.text = "แปลเฉพาะจุด"
+                            }
+                            .addOnCompleteListener {
+                                fullBitmap.recycle()
+                                subBitmap.recycle()
+                            }
+                    } catch (_: Exception) {
+                        isScanningNote = false
+                        binding.btnScanNoteFloat.text = "แปลเฉพาะจุด"
+                        fullBitmap.recycle()
+                    }
+                } else {
+                    isScanningNote = false
+                    binding.btnScanNoteFloat.text = "แปลเฉพาะจุด"
+                    fullBitmap.recycle()
+                }
+            }, Handler(Looper.getMainLooper()))
+        } catch (_: Exception) {
+            isScanningNote = false
+            binding.btnScanNoteFloat.text = "แปลเฉพาะจุด"
+            fullBitmap.recycle()
+        }
+    }
+
+    private fun showNoteTranslationCard(english: String, thai: String) {
+        uiVisibilityHandler.removeCallbacks(hideNoteCardRunnable)
+        binding.tvNoteThaiText.text = thai
+        binding.tvNoteOriginalText.text = english
+        binding.noteTranslationCard.isVisible = true
+
+        val lp = binding.pureFullscreenInner.layoutParams as FrameLayout.LayoutParams
+        lp.gravity = Gravity.BOTTOM
+        binding.pureFullscreenInner.layoutParams = lp
+
+        uiVisibilityHandler.postDelayed(hideNoteCardRunnable, 20000)
+    }
+
+    private fun hideNoteTranslationCard() {
+        uiVisibilityHandler.removeCallbacks(hideNoteCardRunnable)
+        binding.noteTranslationCard.isVisible = false
+        val lp = binding.pureFullscreenInner.layoutParams as FrameLayout.LayoutParams
+        lp.gravity = Gravity.CENTER
+        binding.pureFullscreenInner.layoutParams = lp
     }
 
     private fun levenshteinDistance(s1: String, s2: String): Int {
@@ -1044,6 +1399,14 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
 
     private suspend fun translateToThai(englishText: String): String = withContext(Dispatchers.IO) {
+        if (geminiApiKey.isNotEmpty() && isGeminiTranslateEnabled) {
+            try {
+                val geminiRes = translateWithGemini(englishText)
+                if (!geminiRes.isNullOrBlank()) {
+                    return@withContext geminiRes
+                }
+            } catch (_: Exception) {}
+        }
         try {
             val url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=th&dt=t&q=" + URLEncoder.encode(englishText, "UTF-8")
             val conn = URL(url).openConnection()
@@ -1062,6 +1425,61 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         } catch (_: Exception) {
             englishText
         }
+    }
+
+    private fun translateWithGemini(englishText: String): String? {
+        val endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" +
+            URLEncoder.encode(geminiApiKey, "UTF-8")
+        val conn = (URL(endpoint).openConnection() as java.net.HttpURLConnection).apply {
+            requestMethod = "POST"
+            setRequestProperty("Content-Type", "application/json")
+            connectTimeout = 5000
+            readTimeout = 6000
+            doOutput = true
+        }
+
+        val prompt = "Translate this video game subtitle from English to natural, punchy spoken Thai (movie/game subtitle style). Accurately translate slang, idioms, and profanity/swear words matching the character's raw emotion without censoring or making it overly polite. Return ONLY the Thai translation:\n$englishText"
+        val safetyCategories = listOf(
+            "HARM_CATEGORY_HARASSMENT",
+            "HARM_CATEGORY_HATE_SPEECH",
+            "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+            "HARM_CATEGORY_DANGEROUS_CONTENT"
+        )
+        val safetyArray = JSONArray().apply {
+            for (cat in safetyCategories) {
+                put(org.json.JSONObject().apply {
+                    put("category", cat)
+                    put("threshold", "BLOCK_NONE")
+                })
+            }
+        }
+        val body = org.json.JSONObject().apply {
+            put("contents", JSONArray().put(
+                org.json.JSONObject().put("parts", JSONArray().put(
+                    org.json.JSONObject().put("text", prompt)
+                ))
+            ))
+            put("safetySettings", safetyArray)
+            put("generationConfig", org.json.JSONObject().apply {
+                put("temperature", 0.35)
+                put("maxOutputTokens", 200)
+            })
+        }
+
+        conn.outputStream.bufferedWriter().use { it.write(body.toString()) }
+        if (conn.responseCode !in 200..299) {
+            conn.disconnect()
+            return null
+        }
+        val resText = conn.inputStream.bufferedReader().use { it.readText() }
+        conn.disconnect()
+
+        val json = org.json.JSONObject(resText)
+        val candidates = json.optJSONArray("candidates") ?: return null
+        if (candidates.length() == 0) return null
+        val parts = candidates.getJSONObject(0).optJSONObject("content")?.optJSONArray("parts") ?: return null
+        if (parts.length() == 0) return null
+        return parts.getJSONObject(0).optString("text", "").trim().ifEmpty { null }
     }
 
     private fun isFemaleCharacter(englishText: String, thaiText: String): Boolean {
@@ -1181,7 +1599,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
 
     private fun speakTranslation(englishText: String, thaiText: String) {
-        val ttsEngine = tts ?: return
         val now = System.currentTimeMillis()
         if (isSimilarThai(thaiText, lastSpokenThai) && (now - lastSpokenTimeMs) < 8000) {
             return
@@ -1194,6 +1611,171 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             VoiceGenderMode.FEMALE -> true
             VoiceGenderMode.MALE -> false
         }
+
+        if (geminiApiKey.isNotEmpty() && isGeminiTtsEnabled) {
+            ocrScope.launch {
+                val wavFile = withContext(Dispatchers.IO) {
+                    synthesizeGeminiTts(thaiText, isFemale, now)
+                }
+                if (wavFile != null && isTtsEnabled && !isDestroyed && !isFinishing) {
+                    enqueueGeminiAudio(wavFile)
+                } else if (isTtsEnabled && !isDestroyed && !isFinishing) {
+                    speakWithLocalTts(thaiText, isFemale, now)
+                }
+            }
+            return
+        }
+
+        speakWithLocalTts(thaiText, isFemale, now)
+    }
+
+    private fun synthesizeGeminiTts(thaiText: String, isFemale: Boolean, timestamp: Long): java.io.File? {
+        return try {
+            val conn = (URL("https://generativelanguage.googleapis.com/v1beta/interactions").openConnection() as java.net.HttpURLConnection).apply {
+                requestMethod = "POST"
+                setRequestProperty("x-goog-api-key", geminiApiKey)
+                setRequestProperty("Content-Type", "application/json")
+                connectTimeout = 6000
+                readTimeout = 10000
+                doOutput = true
+            }
+
+            val voiceName = if (isFemale) "Kore" else "Charon"
+            val body = org.json.JSONObject().apply {
+                put("model", "gemini-3.8-flash-lite-tts")
+                put("input", JSONArray().put(
+                    org.json.JSONObject().apply {
+                        put("type", "user_input")
+                        put("content", JSONArray().put(
+                            org.json.JSONObject().apply {
+                                put("type", "text")
+                                put("text", thaiText)
+                            }
+                        ))
+                    }
+                ))
+                put("response_format", org.json.JSONObject().put("type", "audio"))
+                put("generation_config", org.json.JSONObject().put(
+                    "speech_config", JSONArray().put(
+                        org.json.JSONObject().put("voice", voiceName)
+                    )
+                ))
+            }
+
+            conn.outputStream.bufferedWriter().use { it.write(body.toString()) }
+            if (conn.responseCode !in 200..299) {
+                conn.disconnect()
+                return null
+            }
+            val resText = conn.inputStream.bufferedReader().use { it.readText() }
+            conn.disconnect()
+
+            val json = org.json.JSONObject(resText)
+            val steps = json.optJSONArray("steps") ?: return null
+            var base64Audio: String? = null
+            for (i in 0 until steps.length()) {
+                val step = steps.getJSONObject(i)
+                if (step.optString("type") == "model_output") {
+                    val content = step.optJSONArray("content") ?: continue
+                    for (j in 0 until content.length()) {
+                        val item = content.getJSONObject(j)
+                        if (item.optString("type") == "audio") {
+                            base64Audio = item.optString("data", "")
+                        }
+                    }
+                }
+            }
+            if (base64Audio.isNullOrEmpty()) return null
+
+            val audioBytes = Base64.decode(base64Audio, Base64.DEFAULT)
+            val outFile = java.io.File(cacheDir, "gemini_tts_${timestamp}.wav")
+            outFile.writeBytes(audioBytes)
+            outFile
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun enqueueGeminiAudio(wavFile: java.io.File) {
+        when (ttsQueueMode) {
+            TtsQueueMode.QUEUE_ALL -> {
+                geminiAudioQueue.addLast(wavFile)
+                if (geminiMediaPlayer == null) {
+                    playNextGeminiAudio()
+                }
+            }
+            TtsQueueMode.FLUSH_IMMEDIATE -> {
+                stopGeminiAudioPlayback()
+                geminiAudioQueue.addLast(wavFile)
+                playNextGeminiAudio()
+            }
+            TtsQueueMode.SMART_QUEUE -> {
+                if (geminiMediaPlayer == null && geminiAudioQueue.isEmpty()) {
+                    geminiAudioQueue.addLast(wavFile)
+                    playNextGeminiAudio()
+                } else if (geminiAudioQueue.size <= 1) {
+                    geminiAudioQueue.addLast(wavFile)
+                } else {
+                    stopGeminiAudioPlayback()
+                    geminiAudioQueue.addLast(wavFile)
+                    playNextGeminiAudio()
+                }
+            }
+        }
+    }
+
+    private fun playNextGeminiAudio() {
+        if (!isTtsEnabled || isDestroyed || isFinishing) {
+            stopGeminiAudioPlayback()
+            return
+        }
+        val nextFile = geminiAudioQueue.pollFirst() ?: return
+        try {
+            val mp = MediaPlayer()
+            mp.setDataSource(nextFile.absolutePath)
+            mp.prepare()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                try {
+                    mp.playbackParams = PlaybackParams().setSpeed(speechSpeedRate)
+                } catch (_: Exception) {}
+            }
+            mp.setOnCompletionListener {
+                it.release()
+                if (geminiMediaPlayer == it) geminiMediaPlayer = null
+                nextFile.delete()
+                playNextGeminiAudio()
+            }
+            mp.setOnErrorListener { player, _, _ ->
+                player.release()
+                if (geminiMediaPlayer == player) geminiMediaPlayer = null
+                nextFile.delete()
+                playNextGeminiAudio()
+                true
+            }
+            geminiMediaPlayer = mp
+            mp.start()
+        } catch (_: Exception) {
+            nextFile.delete()
+            geminiMediaPlayer = null
+            playNextGeminiAudio()
+        }
+    }
+
+    private fun stopGeminiAudioPlayback() {
+        try {
+            geminiMediaPlayer?.stop()
+        } catch (_: Exception) {}
+        try {
+            geminiMediaPlayer?.release()
+        } catch (_: Exception) {}
+        geminiMediaPlayer = null
+        while (geminiAudioQueue.isNotEmpty()) {
+            geminiAudioQueue.pollFirst()?.delete()
+        }
+    }
+
+    private fun speakWithLocalTts(thaiText: String, isFemale: Boolean, now: Long) {
+        val ttsEngine = tts ?: return
 
         try {
             val voices = ttsEngine.voices
@@ -1388,7 +1970,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
         uiVisibilityHandler.removeCallbacks(captureRunnable)
         uiVisibilityHandler.removeCallbacks(hideMenuButtonRunnable)
+        uiVisibilityHandler.removeCallbacks(hideNoteCardRunnable)
+        uiVisibilityHandler.removeCallbacks(hideTopDrawerRunnable)
         activeUtterances.clear()
+        stopGeminiAudioPlayback()
         ocrScope.cancel()
         tts?.stop()
         tts?.shutdown()
