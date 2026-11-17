@@ -1,4 +1,4 @@
-name: Build Xbox Translator APK
+name: Build XB Translator APK
 
 on:
   push:
@@ -31,33 +31,33 @@ jobs:
       - name: Locate and rename APK
         run: |
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk dist/Xbox-Translator.apk
+          cp app/build/outputs/apk/debug/app-debug.apk dist/XB-Translator.apk
           ls -lh dist/
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Xbox-Translator-APK
-          path: dist/Xbox-Translator.apk
+          name: XB-Translator-APK
+          path: dist/XB-Translator.apk
 
       - name: Create or Update GitHub Release
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/heads/main')
         with:
           tag_name: v1.0.0
-          name: "Xbox Translator v1.0.0 (Remote Play, xCloud, Real-Time Thai Subtitles & TTS)"
+          name: "XB Translator v1.0.0 (Liquid Glass UI, Remote Play, Gemini AI & Dual-Crop Translator)"
           body: |
-            ### 🎮 Xbox Translator v1.0.0 (Android APK & Samsung DeX)
+            ### 🎮 XB Translator v1.0.0 (Android APK & Samsung DeX)
 
-            แอปพลิเคชันสตรีมเกม **Xbox Series X|S / Xbox One (Remote Play)** และ **Xbox Cloud Gaming (xCloud)** พร้อมระบบแปลซับไตเติลและพากย์เสียงภาษาไทยแบบเรียลไทม์
+            แอปพลิเคชันสตรีมเกม **Xbox Series X|S / Xbox One (Remote Play)** และ **Xbox Cloud Gaming (xCloud)** พร้อมระบบแปลซับไตเติล เอกสารเฉพาะจุด และพากย์เสียงไทยแบบเรียลไทม์ในดีไซน์ **Liquid Glass**
 
             **ฟีเจอร์หลัก:**
             - **Xbox Remote Play & xCloud ในแอปเดียว:** เชื่อมต่อผ่าน `xbox.com/play` พร้อมติดตั้งสคริปต์ **Better xCloud** อัตโนมัติ (รองรับ Remote Play ความละเอียดสูงสุด 1080p)
-            - **Smart Subtitle Cascade & Live Styling:** ซับเรียงซ้อน 3 แถวไล่ระดับความจาง ปรับสี/ขนาด/พื้นหลัง/ตำแหน่ง (กลางจอหรือล่างจอ) เห็นผลสดทันที
-            - **No-Duplicate OCR & Translation:** ป้องกันการแปลซ้ำและพากย์ซ้ำกลางคัน
-            - **Thai Voice Dubbing + 3-Mode TTS Queue:** พากย์เสียงไทยอัตโนมัติ ปรับความเร็ว `1.0x–1.5x` และเลือกโหมดคิวเสียงพากย์ 3 แบบ (`อ่านจบประโยค`, `ทันใจตามซับใหม่`, `Smart Queue`)
-            - **Mute Game Audio & Text-Only Mode:** ปิดเฉพาะเสียงเกมในตัวสตรีมเพื่อฟังเสียงพากย์ไทยชัดๆ หรือเปิดโหมดจอดำแสดงเฉพาะซับไทย
-            - **Samsung DeX & Multi-Window Support:** รองรับจอย Xbox / DualSense / Bluetooth และการใช้งานบน Samsung DeX
-          files: dist/Xbox-Translator.apk
+            - **Liquid Glass UI & Spring Physics:** เมนูกระจกโปร่งแสงเด้งจากปุ่ม `☰`, ปุ่มลัดและหน้าต่างคำแปลโปร่งแสงพร้อมฟิสิกส์ยุบ/เด้งเมื่อแตะ
+            - **Dual Crop Box (ซับไตเติล + แปลเฉพาะจุด):** แยกกรอบสีเขียว (อ่านซับต่อเนื่อง) และกรอบสีฟ้า (กดปุ่มไอคอนวงกลมเพื่อแปลเอกสาร/คำแนะนำ ปิดอัตโนมัติใน 20 วิ พร้อมปุ่ม `✕` และปุ่มฟังเสียงพากย์ ใช้งานได้แม้เปิดจอดำเต็มจอ)
+            - **ลิ้นชักควบคุมด่วนด้านบน (Top Quick Drawer):** แตะหรือปัดแถบด้านบนเพื่อเปิด/ปิด **เสียงพากย์**, **เสียงเกม**, **ซับ**, และ **จอดำเต็มจอ** (ซ่อนอัตโนมัติใน 4 วิ)
+            - **รองรับ Gemini API Key (เลือกใช้ได้):** แปลคำแสลง/คำสบถเป็นภาษาพูดไทยธรรมชาติ (`BLOCK_NONE`) + พากย์เสียง AI (สลับกลับระบบฟรีอัตโนมัติเมื่อไม่ใส่คีย์หรือโควตาเต็ม)
+            - **Thai Voice Dubbing + 3-Mode TTS Queue:** พากย์เสียงไทยอัตโนมัติ ปรับความเร็ว `1.0x–1.5x` และเลือกคิวเสียง 3 โหมด (`อ่านจบประโยค`, `ทันใจตามซับใหม่`, `Smart Queue`) รองรับหูฟัง Bluetooth และจำการตั้งค่าทั้งหมดถาวร
+          files: dist/XB-Translator.apk
           draft: false
           prerelease: false
