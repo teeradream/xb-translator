@@ -1149,6 +1149,12 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             updateQuickDrawerUI()
             resetTopDrawerTimer()
         }
+
+        binding.btnQuickTextOnly.setOnClickListener {
+            toggleTextOnlyMode(!isTextOnlyMode)
+            updateQuickDrawerUI()
+            resetTopDrawerTimer()
+        }
         updateQuickDrawerUI()
     }
 
@@ -1208,6 +1214,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         binding.btnQuickSub.text = if (isSubtitleEnabled) "ซับ: เปิด" else "ซับ: ปิด"
         binding.btnQuickSub.setTextColor(Color.parseColor(if (isSubtitleEnabled) "#00FF88" else "#FFFFFF"))
         binding.btnQuickSub.strokeColor = android.content.res.ColorStateList.valueOf(Color.parseColor(if (isSubtitleEnabled) "#00FF88" else "#66FFFFFF"))
+
+        binding.btnQuickTextOnly.text = if (isTextOnlyMode) "จอดำ: เปิด" else "จอดำ: ปิด"
+        binding.btnQuickTextOnly.setTextColor(Color.parseColor(if (isTextOnlyMode) "#00E5FF" else "#FFFFFF"))
+        binding.btnQuickTextOnly.strokeColor = android.content.res.ColorStateList.valueOf(Color.parseColor(if (isTextOnlyMode) "#00E5FF" else "#66FFFFFF"))
     }
 
     private fun setupNoteTranslationFeature() {
@@ -1259,75 +1269,96 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         if (rect.width() <= 0 || rect.height() <= 0) return
 
         isScanningNote = true
-        binding.btnScanNoteFloat.text = "กำลังแปล..."
-        val fullBitmap = Bitmap.createBitmap(webView.width, webView.height, Bitmap.Config.ARGB_8888)
+        binding.btnScanNoteFloat.alpha = 0.45f
+        val wasTextOnlyVisible = isTextOnlyMode && binding.pureFullscreenLayout.isVisible
+        if (wasTextOnlyVisible) {
+            binding.pureFullscreenLayout.visibility = View.INVISIBLE
+        }
 
-        try {
-            PixelCopy.request(window, rect, fullBitmap, { copyResult ->
-                if (copyResult == PixelCopy.SUCCESS) {
-                    try {
-                        val cropLeftNorm = cropPrefs.getFloat("note_crop_left", 0.20f).coerceIn(0f, 0.85f)
-                        val cropTopNorm = cropPrefs.getFloat("note_crop_top", 0.15f).coerceIn(0f, 0.90f)
-                        val cropWidthNorm = cropPrefs.getFloat("note_crop_width", 0.60f).coerceIn(0.10f, 1f - cropLeftNorm)
-                        val cropHeightNorm = cropPrefs.getFloat("note_crop_height", 0.65f).coerceIn(0.06f, 1f - cropTopNorm)
+        val runPixelCopy = {
+            val fullBitmap = Bitmap.createBitmap(webView.width, webView.height, Bitmap.Config.ARGB_8888)
+            try {
+                PixelCopy.request(window, rect, fullBitmap, { copyResult ->
+                    if (wasTextOnlyVisible && isTextOnlyMode) {
+                        binding.pureFullscreenLayout.visibility = View.VISIBLE
+                    }
+                    if (copyResult == PixelCopy.SUCCESS) {
+                        try {
+                            val cropLeftNorm = cropPrefs.getFloat("note_crop_left", 0.20f).coerceIn(0f, 0.85f)
+                            val cropTopNorm = cropPrefs.getFloat("note_crop_top", 0.15f).coerceIn(0f, 0.90f)
+                            val cropWidthNorm = cropPrefs.getFloat("note_crop_width", 0.60f).coerceIn(0.10f, 1f - cropLeftNorm)
+                            val cropHeightNorm = cropPrefs.getFloat("note_crop_height", 0.65f).coerceIn(0.06f, 1f - cropTopNorm)
 
-                        val cropX = (fullBitmap.width * cropLeftNorm).toInt().coerceIn(0, fullBitmap.width - 1)
-                        val cropY = (fullBitmap.height * cropTopNorm).toInt().coerceIn(0, fullBitmap.height - 1)
-                        val cropW = (fullBitmap.width * cropWidthNorm).toInt().coerceIn(40, fullBitmap.width - cropX)
-                        val cropH = (fullBitmap.height * cropHeightNorm).toInt().coerceIn(30, fullBitmap.height - cropY)
+                            val cropX = (fullBitmap.width * cropLeftNorm).toInt().coerceIn(0, fullBitmap.width - 1)
+                            val cropY = (fullBitmap.height * cropTopNorm).toInt().coerceIn(0, fullBitmap.height - 1)
+                            val cropW = (fullBitmap.width * cropWidthNorm).toInt().coerceIn(40, fullBitmap.width - cropX)
+                            val cropH = (fullBitmap.height * cropHeightNorm).toInt().coerceIn(30, fullBitmap.height - cropY)
 
-                        val subBitmap = Bitmap.createBitmap(fullBitmap, cropX, cropY, cropW, cropH)
-                        val image = InputImage.fromBitmap(subBitmap, 0)
-                        textRecognizer.process(image)
-                            .addOnSuccessListener { visionText ->
-                                val blocks = visionText.textBlocks
-                                    .sortedWith(compareBy({ it.boundingBox?.top ?: 0 }, { it.boundingBox?.left ?: 0 }))
-                                    .mapNotNull { block ->
-                                        val t = block.text.trim().replace(Regex("\\s+"), " ")
-                                        if (t.length >= 2) t else null
-                                    }
-                                val rawNote = blocks.joinToString("\n")
-                                if (rawNote.isBlank()) {
-                                    isScanningNote = false
-                                    binding.btnScanNoteFloat.text = "แปลเฉพาะจุด"
-                                    Toast.makeText(this, "ไม่พบข้อความในกรอบเฉพาะจุด", Toast.LENGTH_SHORT).show()
-                                } else {
-                                    ocrScope.launch {
-                                        try {
-                                            val thai = translateToThai(rawNote)
-                                            lastNoteEnglish = rawNote
-                                            lastNoteThai = thai
-                                            showNoteTranslationCard(rawNote, thai)
-                                        } finally {
-                                            isScanningNote = false
-                                            binding.btnScanNoteFloat.text = "แปลเฉพาะจุด"
+                            val subBitmap = Bitmap.createBitmap(fullBitmap, cropX, cropY, cropW, cropH)
+                            val scale = if (cropW * 2 <= 2400 && cropH * 2 <= 1600) 2 else 1
+                            val scaledSub = if (scale == 2) Bitmap.createScaledBitmap(subBitmap, cropW * 2, cropH * 2, true) else subBitmap
+                            val image = InputImage.fromBitmap(scaledSub, 0)
+                            textRecognizer.process(image)
+                                .addOnSuccessListener { visionText ->
+                                    val blocks = visionText.textBlocks
+                                        .sortedWith(compareBy({ it.boundingBox?.top ?: 0 }, { it.boundingBox?.left ?: 0 }))
+                                        .mapNotNull { block ->
+                                            val t = block.text.trim().replace(Regex("\\s+"), " ")
+                                            if (t.length >= 2) t else null
+                                        }
+                                    val rawNote = blocks.joinToString("\n")
+                                    if (rawNote.isBlank()) {
+                                        isScanningNote = false
+                                        binding.btnScanNoteFloat.alpha = 1.0f
+                                        Toast.makeText(this, "ไม่พบข้อความในกรอบเฉพาะจุด", Toast.LENGTH_SHORT).show()
+                                    } else {
+                                        ocrScope.launch {
+                                            try {
+                                                val thai = translateToThai(rawNote)
+                                                lastNoteEnglish = rawNote
+                                                lastNoteThai = thai
+                                                showNoteTranslationCard(rawNote, thai)
+                                            } finally {
+                                                isScanningNote = false
+                                                binding.btnScanNoteFloat.alpha = 1.0f
+                                            }
                                         }
                                     }
                                 }
-                            }
-                            .addOnFailureListener {
-                                isScanningNote = false
-                                binding.btnScanNoteFloat.text = "แปลเฉพาะจุด"
-                            }
-                            .addOnCompleteListener {
-                                fullBitmap.recycle()
-                                subBitmap.recycle()
-                            }
-                    } catch (_: Exception) {
+                                .addOnFailureListener {
+                                    isScanningNote = false
+                                    binding.btnScanNoteFloat.alpha = 1.0f
+                                }
+                                .addOnCompleteListener {
+                                    fullBitmap.recycle()
+                                    subBitmap.recycle()
+                                    if (scaledSub !== subBitmap) scaledSub.recycle()
+                                }
+                        } catch (_: Exception) {
+                            isScanningNote = false
+                            binding.btnScanNoteFloat.alpha = 1.0f
+                            fullBitmap.recycle()
+                        }
+                    } else {
                         isScanningNote = false
-                        binding.btnScanNoteFloat.text = "แปลเฉพาะจุด"
+                        binding.btnScanNoteFloat.alpha = 1.0f
                         fullBitmap.recycle()
                     }
-                } else {
-                    isScanningNote = false
-                    binding.btnScanNoteFloat.text = "แปลเฉพาะจุด"
-                    fullBitmap.recycle()
+                }, Handler(Looper.getMainLooper()))
+            } catch (_: Exception) {
+                if (wasTextOnlyVisible && isTextOnlyMode) {
+                    binding.pureFullscreenLayout.visibility = View.VISIBLE
                 }
-            }, Handler(Looper.getMainLooper()))
-        } catch (_: Exception) {
-            isScanningNote = false
-            binding.btnScanNoteFloat.text = "แปลเฉพาะจุด"
-            fullBitmap.recycle()
+                isScanningNote = false
+                binding.btnScanNoteFloat.alpha = 1.0f
+                fullBitmap.recycle()
+            }
+        }
+
+        if (wasTextOnlyVisible) {
+            uiVisibilityHandler.postDelayed(runPixelCopy, 40)
+        } else {
+            runPixelCopy()
         }
     }
 
