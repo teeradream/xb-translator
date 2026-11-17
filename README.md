@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/teeradream/xbox-translator/releases/latest"><img src="https://img.shields.io/github/v/release/teeradream/xbox-translator?color=00FF88&label=Latest%20Release" alt="Latest Release" /></a>
+  <a href="https://github.com/teeradream/xb-translator/releases/latest"><img src="https://img.shields.io/github/v/release/teeradream/xb-translator?color=00FF88&label=Latest%20Release" alt="Latest Release" /></a>
   <img src="https://img.shields.io/badge/Platform-Android%208.0%2B-blue.svg" alt="Platform" />
   <img src="https://img.shields.io/badge/Samsung%20DeX-Supported-orange.svg" alt="Samsung DeX" />
   <img src="https://img.shields.io/badge/Xbox%20Remote%20Play-Supported-107C10.svg" alt="Xbox Remote Play" />
@@ -46,7 +46,7 @@
 ## 📲 ดาวน์โหลดและติดตั้ง (Download & Installation)
 
 1. ดาวน์โหลดไฟล์ APK ล่าสุดได้ที่หน้า Releases:  
-   👉 **[ดาวน์โหลด XB-Translator.apk](https://github.com/teeradream/xbox-translator/releases/latest)**
+   👉 **[ดาวน์โหลด XB-Translator.apk](https://github.com/teeradream/xb-translator/releases/latest)**
 2. แตะที่ไฟล์ `XB-Translator.apk` เพื่อติดตั้ง (อนุญาตการติดตั้งจากแหล่งที่ไม่รู้จักหากระบบถาม)
 
 ---
