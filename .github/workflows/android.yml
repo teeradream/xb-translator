@@ -44,10 +44,10 @@ jobs:
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/heads/main')
         with:
-          tag_name: v1.0.0
-          name: "XB Translator v1.0.0 (Liquid Glass UI, Remote Play, Gemini AI & Dual-Crop Translator)"
+          tag_name: v1.0.1
+          name: "XB Translator v1.0.1 (Liquid Glass UI, Remote Play, Gemini AI & Dual-Crop Translator)"
           body: |
-            ### 🎮 XB Translator v1.0.0 (Android APK & Samsung DeX)
+            ### 🎮 XB Translator v1.0.1 (Android APK & Samsung DeX)
 
             แอปพลิเคชันสตรีมเกม **Xbox Series X|S / Xbox One (Remote Play)** และ **Xbox Cloud Gaming (xCloud)** พร้อมระบบแปลซับไตเติล เอกสารเฉพาะจุด และพากย์เสียงไทยแบบเรียลไทม์ในดีไซน์ **Liquid Glass**
 
