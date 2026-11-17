@@ -103,6 +103,12 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private var geminiMediaPlayer: MediaPlayer? = null
     private val geminiAudioQueue = java.util.ArrayDeque<java.io.File>()
 
+    data class NoteBlockItem(
+        val english: String,
+        val rect: Rect,
+        var thai: String = ""
+    )
+
     // On-demand Note/Tutorial Crop Box & Top Quick Drawer
     private var isEditingNoteCrop = false
     private var isNoteCropBoxVisible = false
@@ -1151,12 +1157,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             resetTopDrawerTimer()
         }
 
-        binding.btnQuickTextOnly.setOnClickListener {
-            toggleTextOnlyMode(!isTextOnlyMode)
-            updateQuickDrawerUI()
-            resetTopDrawerTimer()
-        }
-
         binding.btnQuickNoteBox.setOnClickListener {
             setFloatingNoteCropBoxVisible(!isNoteCropBoxVisible)
             updateQuickDrawerUI()
@@ -1222,10 +1222,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         binding.btnQuickSub.setTextColor(Color.parseColor(if (isSubtitleEnabled) "#00FF88" else "#FFFFFF"))
         binding.btnQuickSub.strokeColor = android.content.res.ColorStateList.valueOf(Color.parseColor(if (isSubtitleEnabled) "#00FF88" else "#66FFFFFF"))
 
-        binding.btnQuickTextOnly.text = if (isTextOnlyMode) "จอดำ: เปิด" else "จอดำ: ปิด"
-        binding.btnQuickTextOnly.setTextColor(Color.parseColor(if (isTextOnlyMode) "#00E5FF" else "#FFFFFF"))
-        binding.btnQuickTextOnly.strokeColor = android.content.res.ColorStateList.valueOf(Color.parseColor(if (isTextOnlyMode) "#00E5FF" else "#66FFFFFF"))
-
         binding.btnQuickNoteBox.text = if (isNoteCropBoxVisible) "กรอบ: แสดง" else "กรอบ: ซ่อน"
         binding.btnQuickNoteBox.setTextColor(Color.parseColor(if (isNoteCropBoxVisible) "#00E5FF" else "#FFFFFF"))
         binding.btnQuickNoteBox.strokeColor = android.content.res.ColorStateList.valueOf(Color.parseColor(if (isNoteCropBoxVisible) "#00E5FF" else "#66FFFFFF"))
@@ -1241,6 +1237,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
         binding.btnScanNoteFloat.setOnClickListener {
             captureAndTranslateNote()
+        }
+        binding.btnTextOnlyFloat.setOnClickListener {
+            toggleTextOnlyMode(!isTextOnlyMode)
         }
         binding.btnScanNoteFloat.setOnLongClickListener {
             setFloatingNoteCropBoxVisible(!isNoteCropBoxVisible)
@@ -1397,27 +1396,40 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                             val subBitmap = Bitmap.createBitmap(fullBitmap, cropX, cropY, cropW, cropH)
                             val scale = if (cropW * 2 <= 2400 && cropH * 2 <= 1600) 2 else 1
                             val scaledSub = if (scale == 2) Bitmap.createScaledBitmap(subBitmap, cropW * 2, cropH * 2, true) else subBitmap
+                            val bmpW = scaledSub.width
+                            val bmpH = scaledSub.height
                             val image = InputImage.fromBitmap(scaledSub, 0)
                             textRecognizer.process(image)
                                 .addOnSuccessListener { visionText ->
-                                    val blocks = visionText.textBlocks
+                                    val noteBlocks = visionText.textBlocks
                                         .sortedWith(compareBy({ it.boundingBox?.top ?: 0 }, { it.boundingBox?.left ?: 0 }))
                                         .mapNotNull { block ->
                                             val t = block.text.trim().replace(Regex("\\s+"), " ")
-                                            if (t.length >= 2) t else null
+                                            val box = block.boundingBox
+                                            if (t.length >= 2 && box != null) NoteBlockItem(t, Rect(box)) else null
                                         }
-                                    val rawNote = blocks.joinToString("\n")
-                                    if (rawNote.isBlank()) {
+                                    if (noteBlocks.isEmpty()) {
                                         isScanningNote = false
                                         binding.btnScanNoteFloat.alpha = 1.0f
                                         Toast.makeText(this, "ไม่พบข้อความในกรอบเฉพาะจุด", Toast.LENGTH_SHORT).show()
                                     } else {
                                         ocrScope.launch {
                                             try {
-                                                val thai = translateToThai(rawNote)
-                                                lastNoteEnglish = rawNote
-                                                lastNoteThai = thai
-                                                showNoteTranslationCard(rawNote, thai)
+                                                val joinedEng = noteBlocks.joinToString("\n|||\n") { it.english }
+                                                val joinedThai = translateToThai(joinedEng)
+                                                val parts = joinedThai.split(Regex("\\s*\\|\\|\\|\\s*"))
+                                                if (parts.size == noteBlocks.size) {
+                                                    for (i in noteBlocks.indices) {
+                                                        noteBlocks[i].thai = parts[i].trim()
+                                                    }
+                                                } else {
+                                                    for (item in noteBlocks) {
+                                                        item.thai = translateToThai(item.english)
+                                                    }
+                                                }
+                                                lastNoteEnglish = noteBlocks.joinToString("\n") { it.english }
+                                                lastNoteThai = noteBlocks.joinToString("\n") { it.thai }
+                                                showNoteTranslationCard(noteBlocks, bmpW, bmpH)
                                             } finally {
                                                 isScanningNote = false
                                                 binding.btnScanNoteFloat.alpha = 1.0f
@@ -1517,19 +1529,18 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             .apply()
     }
 
-    private fun showNoteTranslationCard(english: String, thai: String) {
+    private fun showNoteTranslationCard(blocks: List<NoteBlockItem>, bmpW: Int, bmpH: Int) {
         uiVisibilityHandler.removeCallbacks(hideNoteCardRunnable)
-        binding.tvNoteThaiText.text = thai
-        binding.tvNoteOriginalText.text = english
 
         val parentW = binding.mainStreamLayout.width
         val parentH = binding.mainStreamLayout.height
         val cardLp = binding.noteTranslationCard.layoutParams as FrameLayout.LayoutParams
+        val targetW: Int
         if (!isTextOnlyMode && parentW > 0 && parentH > 0) {
             val leftNorm = cropPrefs.getFloat("note_crop_left", 0.20f)
             val topNorm = cropPrefs.getFloat("note_crop_top", 0.15f)
             val widthNorm = cropPrefs.getFloat("note_crop_width", 0.60f)
-            val targetW = (parentW * widthNorm).toInt().coerceIn(dpToPx(220), parentW - dpToPx(24))
+            targetW = (parentW * widthNorm).toInt().coerceIn(dpToPx(220), parentW - dpToPx(24))
             val targetX = (parentW * leftNorm).coerceIn(dpToPx(12).toFloat(), (parentW - targetW - dpToPx(12)).toFloat().coerceAtLeast(0f))
             val targetY = (parentH * topNorm).coerceIn(dpToPx(16).toFloat(), (parentH - dpToPx(140)).toFloat().coerceAtLeast(dpToPx(16).toFloat()))
 
@@ -1540,13 +1551,68 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             binding.noteTranslationCard.x = targetX
             binding.noteTranslationCard.y = targetY
         } else {
+            targetW = (parentW - dpToPx(96)).coerceAtLeast(dpToPx(240))
             cardLp.gravity = Gravity.TOP or Gravity.START
-            cardLp.width = (parentW - dpToPx(96)).coerceAtLeast(dpToPx(240))
+            cardLp.width = targetW
             cardLp.height = FrameLayout.LayoutParams.WRAP_CONTENT
             binding.noteTranslationCard.layoutParams = cardLp
             binding.noteTranslationCard.x = dpToPx(24).toFloat()
             binding.noteTranslationCard.y = dpToPx(40).toFloat()
         }
+
+        // Render translated Thai blocks at their detected English boundingBox positions (no English clutter)
+        binding.notePositionalCanvas.removeAllViews()
+        val innerW = (targetW - dpToPx(28)).coerceAtLeast(dpToPx(180))
+        val scaleRatio = if (bmpW > 0) innerW.toFloat() / bmpW.toFloat() else 1f
+        val placedRects = mutableListOf<Rect>()
+        var maxCanvasBottom = dpToPx(48)
+
+        for (item in blocks) {
+            if (item.thai.isBlank()) continue
+            val leftPx = (item.rect.left * scaleRatio).toInt().coerceIn(0, (innerW - dpToPx(80)).coerceAtLeast(0))
+            var topPx = (item.rect.top * scaleRatio).toInt().coerceAtLeast(0)
+            val maxW = (innerW - leftPx).coerceAtLeast(dpToPx(90))
+            val boxHeightPx = (item.rect.height() * scaleRatio).toInt()
+            val textSp = (boxHeightPx / resources.displayMetrics.density * 0.52f).coerceIn(13f, 18f)
+
+            val tv = android.widget.TextView(this).apply {
+                text = item.thai
+                setTextColor(Color.WHITE)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, textSp)
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+                setLineSpacing(dpToPx(2).toFloat(), 1.05f)
+                maxWidth = maxW
+            }
+
+            tv.measure(
+                View.MeasureSpec.makeMeasureSpec(maxW, View.MeasureSpec.AT_MOST),
+                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+            )
+            val measuredW = tv.measuredWidth.coerceAtLeast(dpToPx(24))
+            val measuredH = tv.measuredHeight.coerceAtLeast(dpToPx(18))
+
+            for (prev in placedRects) {
+                val horizOverlap = leftPx < prev.right && (leftPx + measuredW) > prev.left
+                if (horizOverlap && topPx < prev.bottom + dpToPx(4)) {
+                    topPx = prev.bottom + dpToPx(4)
+                }
+            }
+
+            val lp = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                leftMargin = leftPx
+                topMargin = topPx
+            }
+            binding.notePositionalCanvas.addView(tv, lp)
+            val finalRect = Rect(leftPx, topPx, leftPx + measuredW, topPx + measuredH)
+            placedRects.add(finalRect)
+            if (finalRect.bottom > maxCanvasBottom) {
+                maxCanvasBottom = finalRect.bottom
+            }
+        }
+        binding.notePositionalCanvas.minimumHeight = (maxCanvasBottom + dpToPx(8)).coerceAtLeast(dpToPx(48))
 
         binding.noteTranslationCard.isVisible = true
         binding.noteTranslationCard.alpha = 0f
@@ -1692,6 +1758,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         attachLiquidGlassPressPhysics(binding.topQuickDrawerPanel)
         attachLiquidGlassPressPhysics(binding.btnMenuToggle)
         attachLiquidGlassPressPhysics(binding.btnScanNoteFloat)
+        attachLiquidGlassPressPhysics(binding.btnTextOnlyFloat)
         attachLiquidGlassPressPhysics(binding.btnFloatNoteScan)
         attachLiquidGlassPressPhysics(binding.btnFloatNoteHide)
         attachLiquidGlassPressPhysics(binding.btnSpeakNote)
@@ -1970,6 +2037,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             binding.subtitleOverlayContainer.isVisible = false
             binding.floatingNoteCropBox.isVisible = false
             binding.btnTextOnlyMode.text = "กลับสู่หน้าจอเกมปกติ"
+            binding.btnTextOnlyFloat.setColorFilter(Color.parseColor("#00E5FF"))
             if (subtitleHistory.isNotEmpty()) {
                 renderSubtitles()
             } else {
@@ -1986,6 +2054,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             }
             binding.floatingNoteCropBox.isVisible = isNoteCropBoxVisible
             if (isNoteCropBoxVisible) syncFloatingNoteCropBox()
+            binding.btnTextOnlyFloat.setColorFilter(Color.parseColor("#FFFFFF"))
         }
     }
 
