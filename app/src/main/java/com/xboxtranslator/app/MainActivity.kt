@@ -87,6 +87,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     private lateinit var cropPrefs: SharedPreferences
     private var isFilterShortTextEnabled = true
+    private var isSkipSpeakerNameInTts = true
     private var speechSpeedRate = 1.25f
 
     private val subtitleHistory = mutableListOf<SubtitleHistoryItem>()
@@ -339,13 +340,17 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private fun setupVoiceControls() {
         // TTS voice switch (persisted)
         isTtsEnabled = cropPrefs.getBoolean("tts_voice_enabled", false)
+        isSkipSpeakerNameInTts = cropPrefs.getBoolean("skip_speaker_name_tts", true)
         binding.ttsVoiceSwitch.isChecked = isTtsEnabled
+        binding.skipSpeakerNameInTtsSwitch.isChecked = isSkipSpeakerNameInTts
+        binding.skipSpeakerNameInTtsSwitch.isVisible = isTtsEnabled
         binding.voiceGenderContainer.isVisible = isTtsEnabled
         binding.speechSpeedContainer.isVisible = isTtsEnabled
         binding.ttsQueueModeContainer.isVisible = isTtsEnabled
         binding.ttsVoiceSwitch.setOnCheckedChangeListener { _, isChecked ->
             isTtsEnabled = isChecked
             cropPrefs.edit().putBoolean("tts_voice_enabled", isChecked).apply()
+            binding.skipSpeakerNameInTtsSwitch.isVisible = isChecked
             binding.voiceGenderContainer.isVisible = isChecked
             binding.speechSpeedContainer.isVisible = isChecked
             binding.ttsQueueModeContainer.isVisible = isChecked
@@ -355,6 +360,11 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 stopGeminiAudioPlayback()
             }
             updateQuickDrawerUI()
+        }
+
+        binding.skipSpeakerNameInTtsSwitch.setOnCheckedChangeListener { _, isChecked ->
+            isSkipSpeakerNameInTts = isChecked
+            cropPrefs.edit().putBoolean("skip_speaker_name_tts", isChecked).apply()
         }
 
         val savedVoiceMode = cropPrefs.getString("voice_gender_mode", VoiceGenderMode.AUTO_AI.name)
@@ -2065,7 +2075,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         s = s.replace("wc ", "we ").replace("Wc ", "We ")
         s = s.replace("mc ", "me ").replace("bc ", "be ")
         s = s.replace("0f", "of").replace("0n", "on").replace("t0", "to")
-        s = s.replace("|", "I").replace("!", "l").replace("1", "l")
+        s = s.replace("|", "I").replace(Regex("(?<=[a-zA-Z])!(?=[a-zA-Z])"), "l").replace("1", "l")
         s = s.replace(Regex("(?<=\\w)\\.(?=\\w)"), "")
         return s.trim()
     }
@@ -2118,21 +2128,35 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             VoiceGenderMode.MALE -> false
         }
 
+        val spokenThai = if (isSkipSpeakerNameInTts) {
+            stripSpeakerPrefix(thaiText)
+        } else {
+            thaiText
+        }
+
         if (geminiApiKey.isNotEmpty() && isGeminiTtsEnabled) {
             ocrScope.launch {
                 val wavFile = withContext(Dispatchers.IO) {
-                    synthesizeGeminiTts(thaiText, isFemale, now)
+                    synthesizeGeminiTts(spokenThai, isFemale, now)
                 }
                 if (wavFile != null && isTtsEnabled && !isDestroyed && !isFinishing) {
                     enqueueGeminiAudio(wavFile)
                 } else if (isTtsEnabled && !isDestroyed && !isFinishing) {
-                    speakWithLocalTts(thaiText, isFemale, now)
+                    speakWithLocalTts(spokenThai, isFemale, now)
                 }
             }
             return
         }
 
-        speakWithLocalTts(thaiText, isFemale, now)
+        speakWithLocalTts(spokenThai, isFemale, now)
+    }
+
+    private fun stripSpeakerPrefix(text: String): String {
+        val stripped = text
+            .replace(Regex("^\\[[^\\]]{1,26}\\]\\s*"), "")
+            .replace(Regex("^[^:\\n]{1,26}:\\s*"), "")
+            .trim()
+        return if (stripped.isNotEmpty()) stripped else text
     }
 
     private fun synthesizeGeminiTts(thaiText: String, isFemale: Boolean, timestamp: Long): java.io.File? {
