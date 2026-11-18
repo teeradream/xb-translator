@@ -80,6 +80,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private var isCapturing = false
     private var isTranslating = false
     private var pendingOcrEnglish = ""
+    private var queuedLatestEnglish = ""
     private var lastTranslatedEnglish = ""
     private var lastTranslatedThai = ""
     private var lastSpokenThai = ""
@@ -158,7 +159,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             if (isSubtitleEnabled || isTtsEnabled) {
                 captureAndTranslateFrame()
             }
-            uiVisibilityHandler.postDelayed(this, 1500)
+            uiVisibilityHandler.postDelayed(this, 400)
         }
     }
 
@@ -669,31 +670,11 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     val isDuplicateOfLast = isSimilarText(text, lastTranslatedEnglish)
                     val isDuplicateOfRecent = subtitleHistory.take(2).any { isSimilarText(text, it.english) }
 
-                    if (!isTranslating && !isDuplicateOfPending && !isDuplicateOfLast && !isDuplicateOfRecent) {
-                        isTranslating = true
-                        pendingOcrEnglish = text
-                        ocrScope.launch {
-                            try {
-                                val englishForTranslate = if (isSkipSpeakerNameInTts) stripSpeakerPrefix(text) else text
-                                val rawThai = translateToThai(englishForTranslate)
-                                val thai = if (isSkipSpeakerNameInTts) stripSpeakerPrefix(rawThai) else rawThai
-                                val isDuplicateThai = isSimilarThai(thai, lastTranslatedThai) ||
-                                    subtitleHistory.take(2).any { isSimilarThai(thai, it.thai) }
-                                if (!isDuplicateThai) {
-                                    lastTranslatedEnglish = text
-                                    lastTranslatedThai = thai
-                                    subtitleHistory.add(0, SubtitleHistoryItem(englishForTranslate, thai))
-                                    while (subtitleHistory.size > maxHistoryLines) {
-                                        subtitleHistory.removeAt(subtitleHistory.size - 1)
-                                    }
-                                    renderSubtitles()
-                                    if (isTtsEnabled) {
-                                        speakTranslation(text, thai)
-                                    }
-                                }
-                            } finally {
-                                isTranslating = false
-                            }
+                    if (!isDuplicateOfPending && !isDuplicateOfLast && !isDuplicateOfRecent) {
+                        if (isTranslating) {
+                            queuedLatestEnglish = text
+                        } else {
+                            startSubtitleTranslation(text)
                         }
                     }
                 }
@@ -701,6 +682,42 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             .addOnCompleteListener {
                 bitmap.recycle()
             }
+    }
+
+    private fun startSubtitleTranslation(text: String) {
+        isTranslating = true
+        pendingOcrEnglish = text
+        ocrScope.launch {
+            try {
+                val englishForTranslate = if (isSkipSpeakerNameInTts) stripSpeakerPrefix(text) else text
+                val rawThai = translateToThai(englishForTranslate)
+                val thai = if (isSkipSpeakerNameInTts) stripSpeakerPrefix(rawThai) else rawThai
+                val isDuplicateThai = isSimilarThai(thai, lastTranslatedThai) ||
+                    subtitleHistory.take(2).any { isSimilarThai(thai, it.thai) }
+                if (!isDuplicateThai) {
+                    lastTranslatedEnglish = text
+                    lastTranslatedThai = thai
+                    subtitleHistory.add(0, SubtitleHistoryItem(englishForTranslate, thai))
+                    while (subtitleHistory.size > maxHistoryLines) {
+                        subtitleHistory.removeAt(subtitleHistory.size - 1)
+                    }
+                    renderSubtitles()
+                    if (isTtsEnabled) {
+                        speakTranslation(text, thai)
+                    }
+                }
+            } finally {
+                isTranslating = false
+                val next = queuedLatestEnglish
+                queuedLatestEnglish = ""
+                if (next.isNotEmpty() &&
+                    !isSimilarText(next, lastTranslatedEnglish) &&
+                    !subtitleHistory.take(2).any { isSimilarText(next, it.english) }
+                ) {
+                    startSubtitleTranslation(next)
+                }
+            }
+        }
     }
 
     private fun setupSubtitleStylingControls() {
