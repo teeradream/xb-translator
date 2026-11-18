@@ -658,7 +658,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
 
     private fun processCroppedBitmap(bitmap: Bitmap) {
-        isCapturing = false
         val image = InputImage.fromBitmap(bitmap, 0)
         textRecognizer.process(image)
             .addOnSuccessListener { visionText ->
@@ -681,6 +680,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             }
             .addOnCompleteListener {
                 bitmap.recycle()
+                isCapturing = false
             }
     }
 
